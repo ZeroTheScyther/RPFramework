@@ -32,7 +32,7 @@ jobs:
 
             - name: Package
               run: |
-                  $src = "SamplePlugin\bin\x64\Release"
+                  $src = "/SamplePlugin/bin/Debug*"
                   Write-Host "Checking output directory:"
                   Get-ChildItem -Path $src -Recurse
                   if (-not (Test-Path $src)) {
