@@ -55,16 +55,15 @@ public class BgmPlayerWindow : Window, IDisposable
         plugin.Network.Reconnected           += OnNetworkReconnected;
     }
 
-    public void OpenRoom(RpRoom rpRoom, BgmService svc)
+    public void OpenRoom(RpRoom rpRoom, BgmService svc, bool autoJoin = true)
     {
         room       = rpRoom;
         bgmService = svc;
         WindowName = $"{rpRoom.Name}##RPFramework.BGMPlayer";
         members.Clear();
-        RefreshAuthority(); // correct button state immediately for local-only mode
+        RefreshAuthority();
 
-        // Join the room on the relay — Identify already ran at connect time, no need to re-check LocalPlayerId
-        if (plugin.Network.IsConnected)
+        if (autoJoin && plugin.Network.IsConnected)
             Task.Run(() => plugin.Network.BgmJoinAsync(rpRoom.Code));
     }
 

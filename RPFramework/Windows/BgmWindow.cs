@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Numerics;
+using System.Threading.Tasks;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
@@ -45,6 +46,12 @@ public class BgmWindow : Window, IDisposable
 
     public override void Draw()
     {
+        if (!plugin.Network.IsConnected)
+        {
+            DrawNotConnected();
+            return;
+        }
+
         if (pendingCreate) { createOpen = true; ImGui.OpenPopup("##bgm_create"); pendingCreate = false; }
         if (pendingJoin)   { joinOpen   = true; ImGui.OpenPopup("##bgm_join");   pendingJoin   = false; }
 
@@ -136,6 +143,28 @@ public class BgmWindow : Window, IDisposable
         DrawJoinModal(rooms);
     }
 
+    private void DrawNotConnected()
+    {
+        var avail  = ImGui.GetContentRegionAvail();
+        float lineH = ImGui.GetTextLineHeightWithSpacing();
+        ImGui.SetCursorPosY(ImGui.GetCursorPosY() + avail.Y / 2 - lineH);
+
+        const string msg = "Not connected to server";
+        ImGui.SetCursorPosX((avail.X - ImGui.CalcTextSize(msg).X) / 2);
+        ImGui.TextDisabled(msg);
+
+        float btnW = 120 * ImGuiHelpers.GlobalScale;
+        ImGui.SetCursorPosX((avail.X - btnW) / 2);
+        if (ImGui.Button("Reconnect##bgmreconnect", new Vector2(btnW, 0)))
+        {
+            string url  = plugin.Configuration.ServerUrl;
+            string? id  = plugin.LocalPlayerId;
+            string name = plugin.LocalDisplayName;
+            if (id != null)
+                Task.Run(() => plugin.Network.ConnectAsync(url, id, name));
+        }
+    }
+
     private void DrawJoinModal(List<RpRoom> rooms)
     {
         var center = ImGui.GetMainViewport().GetCenter();
@@ -208,14 +237,14 @@ public class BgmWindow : Window, IDisposable
             rooms.Add(room);
             selectedRoom = rooms.Count - 1;
             plugin.Configuration.Save();
-            // Register ownership server-side before joining so the owner record exists
-            // when BgmJoin is called inside OpenRoom.
-            if (plugin.Network.IsConnected)
+            // Sequence: register ownership first, then join — both in one task so order is guaranteed.
+            string code = room.Code;
+            Task.Run(async () =>
             {
-                string code = room.Code;
-                System.Threading.Tasks.Task.Run(() => plugin.Network.BgmCreateRoomAsync(code));
-            }
-            playerWindow.OpenRoom(room, bgmService);
+                await plugin.Network.BgmCreateRoomAsync(code);
+                await plugin.Network.BgmJoinAsync(code);
+            });
+            playerWindow.OpenRoom(room, bgmService, autoJoin: false);
             playerWindow.IsOpen = true;
             ImGui.CloseCurrentPopup();
         }
