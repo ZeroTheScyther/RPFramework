@@ -3,7 +3,7 @@
     "Author": "ZeroTheScyther",
     "Name": "RPFramework",
     "InternalName": "RPFramework",
-    "AssemblyVersion": "0.1.4.4",
+    "AssemblyVersion": "0.1.4.5",
     "Punchline": "RP tools for FFXIV — custom inventory, dice rolls, and more.",
     "Description": "RPFramework provides roleplay helpers including a custom item inventory (/rpinv or /rpinventory), a synced BGM player (/rpbgm), inventory trading and shared bags over a relay server, and more modules coming soon.",
     "RepoUrl": "https://github.com/ZeroTheScyther/RPFramework",

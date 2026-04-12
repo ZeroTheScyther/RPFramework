@@ -79,6 +79,7 @@ public class BagShareInviteWindow : Window, IDisposable
             Id          = inv.Bag.BagId,
             Name        = inv.Bag.Name,
             SharedOwner = inv.Bag.OwnerPlayerId,
+            Gil         = inv.Bag.Gil,
         };
         foreach (var dto in inv.Bag.Items)
             bag.Items.Add(Plugin.DtoToItem(dto));

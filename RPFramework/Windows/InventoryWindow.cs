@@ -149,12 +149,43 @@ public class InventoryWindow : Window, IDisposable
             var bag = bags[i];
             using var tab = ImRaii.TabItem($"{bag.Name}##rpt{bag.Id}");
 
-            // Right-click tab → context popup (Rename / Delete)
-            if (ImGui.IsItemHovered() && ImGui.IsMouseClicked(ImGuiMouseButton.Right))
+            if (ImGui.IsItemHovered())
             {
-                ctxTabBag      = bag;
-                ctxTabBagIdx   = i;
-                pendingTabCtxMenu = true;
+                // Right-click → context popup
+                if (ImGui.IsMouseClicked(ImGuiMouseButton.Right))
+                {
+                    ctxTabBag      = bag;
+                    ctxTabBagIdx   = i;
+                    pendingTabCtxMenu = true;
+                }
+
+                // Tooltip showing share info for shared bags
+                if (bag.IsShared)
+                {
+                    ImGui.BeginTooltip();
+                    string ownerDisplay = bag.SharedOwner?.Split('@')[0] ?? "Unknown";
+                    bool isOwner = bag.SharedOwner == plugin.LocalPlayerId;
+                    if (isOwner)
+                    {
+                        ImGui.TextUnformatted("Shared bag (you are the owner)");
+                        plugin.BagParticipants.TryGetValue(bag.Id, out var parts);
+                        if (parts != null && parts.Count > 0)
+                        {
+                            ImGui.TextDisabled("Shared with:");
+                            foreach (var kv in parts)
+                                ImGui.TextUnformatted($"  {kv.Value}");
+                        }
+                        else
+                        {
+                            ImGui.TextDisabled("No participants yet");
+                        }
+                    }
+                    else
+                    {
+                        ImGui.TextUnformatted($"Shared bag — Owner: {ownerDisplay}");
+                    }
+                    ImGui.EndTooltip();
+                }
             }
 
             if (tab) selectedTab = i;
@@ -174,14 +205,20 @@ public class InventoryWindow : Window, IDisposable
 
     private void DrawGilRow()
     {
-        int gil = plugin.Configuration.Gil;
+        var bags = plugin.Configuration.Bags;
+        if (bags.Count == 0 || selectedTab >= bags.Count) return;
+        var bag = bags[selectedTab];
+
+        int gil = bag.Gil;
         float labelW = ImGui.CalcTextSize("Gil").X + ImGui.GetStyle().ItemSpacing.X;
         ImGui.SetNextItemWidth(ImGui.GetContentRegionAvail().X - labelW);
         if (ImGui.InputInt("Gil##rpgil", ref gil, 0, 0))
         {
             if (gil < 0) gil = 0;
-            plugin.Configuration.Gil = gil;
+            bag.Gil = gil;
             plugin.Configuration.Save();
+            if (bag.IsShared)
+                plugin.PublishBagOp(bag.Id, RPFramework.Models.Net.BagOpType.SetGil, gil: gil);
         }
     }
 
@@ -457,7 +494,8 @@ public class InventoryWindow : Window, IDisposable
                     bag.Name,
                     plugin.LocalPlayerId ?? string.Empty,
                     bag.Items.ConvertAll(i => new RpItemDto(i.Id, i.Name, i.Description, i.IconId, i.Amount)),
-                    0L);
+                    0L,
+                    bag.Gil);
                 bag.SharedOwner = plugin.LocalPlayerId;
                 plugin.Configuration.SharedBags.Add(new SharedBagRef
                     { BagId = bag.Id, OwnerPlayerId = plugin.LocalPlayerId ?? string.Empty, IsOwner = true });

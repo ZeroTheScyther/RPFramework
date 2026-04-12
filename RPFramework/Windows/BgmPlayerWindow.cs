@@ -29,6 +29,8 @@ public class BgmPlayerWindow : Window, IDisposable
 
     // Whether local player is owner/admin in this room
     private bool isAuthority;
+    // Whether local player is currently in the server session (not disconnected via Leave)
+    private bool isInRoom;
 
     public BgmPlayerWindow(Plugin plugin)
         : base("RP BGM Player##RPFramework.BGMPlayer")
@@ -250,13 +252,12 @@ public class BgmPlayerWindow : Window, IDisposable
     private void RefreshAuthority()
     {
         string? localId = plugin.LocalPlayerId;
-        if (localId == null) { isAuthority = true; return; } // not logged in → local only
+        if (localId == null) { isAuthority = true; isInRoom = false; return; }
 
-        // No server connection → act as local authority (no one to sync with)
-        if (!plugin.Network.IsConnected) { isAuthority = true; return; }
+        if (!plugin.Network.IsConnected) { isAuthority = true; isInRoom = false; return; }
 
-        // Connected: only grant authority if the server has explicitly said so
         var self = members.Find(m => m.PlayerId == localId);
+        isInRoom    = self != null;
         isAuthority = self?.Role is RoomRole.Owner or RoomRole.Admin;
     }
 
@@ -295,6 +296,29 @@ public class BgmPlayerWindow : Window, IDisposable
             ImGui.SameLine();
             ImGui.TextColored(new Vector4(0.3f, 0.85f, 0.3f, 1f), "●");
             if (ImGui.IsItemHovered()) ImGui.SetTooltip("Connected to relay");
+
+            // Leave room — disconnect from server session without deleting the local room
+            ImGui.SameLine();
+            if (isInRoom)
+            {
+                if (ImGui.SmallButton("Leave##bgmleave"))
+                {
+                    string code = room.Code;
+                    Task.Run(() => plugin.Network.BgmLeaveAsync(code));
+                    members.Clear();
+                    RefreshAuthority();
+                }
+                if (ImGui.IsItemHovered()) ImGui.SetTooltip("Disconnect from this room's session (keeps your local room)");
+            }
+            else
+            {
+                if (ImGui.SmallButton("Join##bgmrejoin"))
+                {
+                    string code = room.Code;
+                    Task.Run(() => plugin.Network.BgmJoinAsync(code));
+                }
+                if (ImGui.IsItemHovered()) ImGui.SetTooltip("Join the room session");
+            }
         }
         else
         {

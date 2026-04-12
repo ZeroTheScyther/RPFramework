@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Threading.Tasks;
 using Dalamud.Game.Command;
@@ -35,6 +36,12 @@ public sealed class Plugin : IDalamudPlugin
 
     public Configuration   Configuration { get; init; }
     public readonly WindowSystem WindowSystem = new("RPFramework");
+
+    /// <summary>
+    /// In-memory participant display names, keyed by bag ID then player ID.
+    /// Populated from server events; cleared on plugin unload.
+    /// </summary>
+    public readonly Dictionary<Guid, Dictionary<string, string>> BagParticipants = new();
 
     private bool _autoConnectPending;
 
@@ -82,9 +89,11 @@ public sealed class Plugin : IDalamudPlugin
         Network.TradeItemReceived   += OnTradeItemReceived;
         Network.TradeAccepted       += OnTradeAccepted;
         Network.BagShareInviteReceived += OnBagShareInvite;
-        Network.BagOperationApplied += OnBagOperationApplied;
-        Network.BagDissolved        += OnBagDissolved;
-        Network.BagStateReceived    += OnBagStateReceived;
+        Network.BagOperationApplied    += OnBagOperationApplied;
+        Network.BagDissolved           += OnBagDissolved;
+        Network.BagStateReceived       += OnBagStateReceived;
+        Network.BagParticipantJoined   += OnBagParticipantJoined;
+        Network.BagParticipantLeft     += OnBagParticipantLeft;
 
         CommandManager.AddHandler(CmdInventory,      new CommandInfo(OnInventoryCmd)  { HelpMessage = "Opens the RP Inventory" });
         CommandManager.AddHandler(CmdInventoryShort, new CommandInfo(OnInventoryCmd)  { HelpMessage = "Opens the RP Inventory" });
@@ -113,6 +122,8 @@ public sealed class Plugin : IDalamudPlugin
         Network.BagOperationApplied    -= OnBagOperationApplied;
         Network.BagDissolved           -= OnBagDissolved;
         Network.BagStateReceived       -= OnBagStateReceived;
+        Network.BagParticipantJoined   -= OnBagParticipantJoined;
+        Network.BagParticipantLeft     -= OnBagParticipantLeft;
 
         Framework.Update                       -= OnFrameworkUpdate;
         ClientState.Login                      -= OnLogin;
@@ -198,6 +209,9 @@ public sealed class Plugin : IDalamudPlugin
                 if (bag.Items.RemoveAll(i => i.Id == itemId) > 0)
                 {
                     Configuration.Save();
+                    // If the item came from a shared bag, sync the removal to all participants
+                    if (bag.IsShared)
+                        PublishBagOp(bag.Id, Models.Net.BagOpType.RemoveItem, itemId: itemId);
                     break;
                 }
             }
@@ -254,6 +268,9 @@ public sealed class Plugin : IDalamudPlugin
             case Models.Net.BagOpType.Rename when op.NewName != null:
                 bag.Name = op.NewName;
                 break;
+            case Models.Net.BagOpType.SetGil when op.Gil.HasValue:
+                bag.Gil = op.Gil.Value;
+                break;
         }
 
         var sharedRef = Configuration.SharedBags.Find(r => r.BagId == op.BagId);
@@ -265,7 +282,21 @@ public sealed class Plugin : IDalamudPlugin
     {
         Configuration.Bags.RemoveAll(b => b.Id == bagId);
         Configuration.SharedBags.RemoveAll(r => r.BagId == bagId);
+        BagParticipants.Remove(bagId);
         Configuration.Save();
+    }
+
+    private void OnBagParticipantJoined(System.Guid bagId, string playerId, string displayName)
+    {
+        if (!BagParticipants.TryGetValue(bagId, out var dict))
+            BagParticipants[bagId] = dict = new Dictionary<string, string>();
+        dict[playerId] = displayName;
+    }
+
+    private void OnBagParticipantLeft(System.Guid bagId, string playerId)
+    {
+        if (BagParticipants.TryGetValue(bagId, out var dict))
+            dict.Remove(playerId);
     }
 
     private void OnBagStateReceived(Models.Net.SharedBagDto dto)
@@ -274,6 +305,7 @@ public sealed class Plugin : IDalamudPlugin
         if (bag == null) return;
         bag.Items.Clear();
         bag.Items.AddRange(dto.Items.ConvertAll(DtoToItem));
+        bag.Gil = dto.Gil;
         var sharedRef = Configuration.SharedBags.Find(r => r.BagId == dto.BagId);
         if (sharedRef != null) sharedRef.Version = dto.Version;
         Configuration.Save();
@@ -284,11 +316,11 @@ public sealed class Plugin : IDalamudPlugin
     /// No-op if the bag is not registered as shared.
     /// </summary>
     public void PublishBagOp(Guid bagId, Models.Net.BagOpType opType,
-        Models.Net.RpItemDto? item = null, Guid? itemId = null, string? newName = null)
+        Models.Net.RpItemDto? item = null, Guid? itemId = null, string? newName = null, int? gil = null)
     {
         var sharedRef = Configuration.SharedBags.Find(r => r.BagId == bagId);
         if (sharedRef == null) return;
-        var op = new Models.Net.BagOperationDto(bagId, sharedRef.Version, opType, item, itemId, newName);
+        var op = new Models.Net.BagOperationDto(bagId, sharedRef.Version, opType, item, itemId, newName, gil);
         Task.Run(() => Network.ApplyBagOperation(op));
     }
 

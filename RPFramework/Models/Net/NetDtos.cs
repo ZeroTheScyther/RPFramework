@@ -10,7 +10,7 @@ namespace RPFramework.Models.Net;
 
 public enum RoomRole { Member, Admin, Owner }
 public enum NetLoopMode { None, Single, All }
-public enum BagOpType  { AddItem, RemoveItem, UpdateItem, Rename }
+public enum BagOpType  { AddItem, RemoveItem, UpdateItem, Rename, SetGil }
 
 // ── BGM ──────────────────────────────────────────────────────────────────────
 
@@ -64,7 +64,8 @@ public record SharedBagDto(
     string          Name,
     string          OwnerPlayerId,
     List<RpItemDto> Items,
-    long            Version
+    long            Version,
+    int             Gil = 0
 );
 
 public record BagOperationDto(
@@ -73,5 +74,6 @@ public record BagOperationDto(
     BagOpType OpType,
     RpItemDto? Item,
     Guid?     ItemId,
-    string?   NewName
+    string?   NewName,
+    int?      Gil = null
 );

@@ -9,6 +9,7 @@ public class RpBag
     public Guid         Id           { get; set; } = Guid.NewGuid();
     public string       Name         { get; set; } = "Bag";
     public List<RpItem> Items        { get; set; } = new();
+    public int          Gil          { get; set; } = 0;
 
     // Shared bag metadata (null = not shared)
     public string?      SharedOwner  { get; set; } = null;  // playerId of the owner
