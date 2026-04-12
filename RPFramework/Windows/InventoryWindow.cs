@@ -404,13 +404,17 @@ public class InventoryWindow : Window, IDisposable
         if (ctxTabBag == null) return;
         if (!ImGui.BeginPopup("##rp_tabctx")) return;
 
-        ImGui.TextDisabled(ctxTabBag.Name);
+        // Capture locally — CloseCurrentPopup() is deferred, so code after it still runs
+        // and ctxTabBag must not be nulled mid-popup.
+        var bag = ctxTabBag;
+
+        ImGui.TextDisabled(bag.Name);
         ImGui.Separator();
 
         if (ImGui.MenuItem("Rename"))
         {
-            renamingBag      = ctxTabBag;
-            renameBagName    = ctxTabBag.Name;
+            renamingBag      = bag;
+            renameBagName    = bag.Name;
             pendingRenameBag = true;
             ImGui.CloseCurrentPopup();
         }
@@ -418,7 +422,7 @@ public class InventoryWindow : Window, IDisposable
         ImGui.Separator();
 
         // Sharing — only for non-shared bags
-        if (!ctxTabBag.IsShared)
+        if (!bag.IsShared)
         {
             bool connected   = plugin.Network.IsConnected;
             string? targetId = GetTargetPlayerId();
@@ -427,19 +431,17 @@ public class InventoryWindow : Window, IDisposable
             if (!canShare) ImGui.BeginDisabled();
             if (ImGui.MenuItem("Share with target##rpbagshare"))
             {
-                var bagToShare = ctxTabBag;
                 var dto = new SharedBagDto(
-                    bagToShare.Id,
-                    bagToShare.Name,
+                    bag.Id,
+                    bag.Name,
                     plugin.LocalPlayerId ?? string.Empty,
-                    bagToShare.Items.ConvertAll(i => new RpItemDto(i.Id, i.Name, i.Description, i.IconId, i.Amount)),
+                    bag.Items.ConvertAll(i => new RpItemDto(i.Id, i.Name, i.Description, i.IconId, i.Amount)),
                     0L);
-                bagToShare.SharedOwner = plugin.LocalPlayerId;
+                bag.SharedOwner = plugin.LocalPlayerId;
                 plugin.Configuration.SharedBags.Add(new SharedBagRef
-                    { BagId = bagToShare.Id, OwnerPlayerId = plugin.LocalPlayerId ?? string.Empty, IsOwner = true });
+                    { BagId = bag.Id, OwnerPlayerId = plugin.LocalPlayerId ?? string.Empty, IsOwner = true });
                 plugin.Configuration.Save();
                 Task.Run(() => plugin.Network.ShareBag(targetId!, dto));
-                ctxTabBag = null;
                 ImGui.CloseCurrentPopup();
             }
             if (!canShare && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
@@ -448,15 +450,13 @@ public class InventoryWindow : Window, IDisposable
         }
         else
         {
-            bool isOwner = plugin.LocalPlayerId == ctxTabBag.SharedOwner;
+            bool isOwner = plugin.LocalPlayerId == bag.SharedOwner;
             if (isOwner)
             {
                 if (ImGui.MenuItem("Dissolve shared bag##rpbagdissolve"))
                 {
-                    Guid bagId = ctxTabBag.Id;
-                    Task.Run(() => plugin.Network.DissolveBag(bagId));
+                    Task.Run(() => plugin.Network.DissolveBag(bag.Id));
                     // OnBagDissolved handler will remove it from config
-                    ctxTabBag = null;
                     ImGui.CloseCurrentPopup();
                 }
                 if (ImGui.IsItemHovered()) ImGui.SetTooltip("Removes bag for all participants");
@@ -465,13 +465,11 @@ public class InventoryWindow : Window, IDisposable
             {
                 if (ImGui.MenuItem("Disconnect from shared bag##rpbagdisconn"))
                 {
-                    Guid bagId = ctxTabBag.Id;
-                    bags.RemoveAll(b => b.Id == bagId);
-                    plugin.Configuration.SharedBags.RemoveAll(r => r.BagId == bagId);
+                    bags.RemoveAll(b => b.Id == bag.Id);
+                    plugin.Configuration.SharedBags.RemoveAll(r => r.BagId == bag.Id);
                     if (selectedTab >= bags.Count) selectedTab = bags.Count - 1;
                     plugin.Configuration.Save();
-                    Task.Run(() => plugin.Network.DisconnectFromBag(bagId));
-                    ctxTabBag = null;
+                    Task.Run(() => plugin.Network.DisconnectFromBag(bag.Id));
                     ImGui.CloseCurrentPopup();
                 }
             }
@@ -479,14 +477,12 @@ public class InventoryWindow : Window, IDisposable
 
         ImGui.Separator();
 
-        bool canDeleteBag = bags.Count > 1 && !ctxTabBag!.IsShared;
+        bool canDeleteBag = bags.Count > 1 && !bag.IsShared;
         if (!canDeleteBag) ImGui.BeginDisabled();
         if (ImGui.MenuItem("Delete"))
         {
-            int delIdx = ctxTabBagIdx;
-            bags.RemoveAt(delIdx);
+            bags.RemoveAt(ctxTabBagIdx);
             if (selectedTab >= bags.Count) selectedTab = bags.Count - 1;
-            ctxTabBag = null;
             plugin.Configuration.Save();
             ImGui.CloseCurrentPopup();
         }

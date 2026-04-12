@@ -41,7 +41,7 @@ public class NetworkService : IDisposable
 
     // ── Trade events ──────────────────────────────────────────────────────────
     public event Action<TradeOfferDto>?  TradeOfferReceived;
-    public event Action<Guid, bool>?     TradeAccepted;   // offerId, isCopy
+    public event Action<Guid, bool, Guid>? TradeAccepted;   // offerId, isCopy, itemId
     public event Action<Guid>?           TradeRejected;
     public event Action<Guid, RpItemDto, bool>? TradeItemReceived; // offerId, item, isCopy
 
@@ -151,8 +151,8 @@ public class NetworkService : IDisposable
         _conn.On<TradeOfferDto>("OnTradeOfferReceived",
             o => Fire(() => TradeOfferReceived?.Invoke(o)));
 
-        _conn.On<Guid, bool>("OnTradeAccepted",
-            (id, isCopy) => Fire(() => TradeAccepted?.Invoke(id, isCopy)));
+        _conn.On<Guid, bool, Guid>("OnTradeAccepted",
+            (id, isCopy, itemId) => Fire(() => TradeAccepted?.Invoke(id, isCopy, itemId)));
 
         _conn.On<Guid>("OnTradeRejected",
             id => Fire(() => TradeRejected?.Invoke(id)));

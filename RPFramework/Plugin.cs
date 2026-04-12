@@ -1,3 +1,4 @@
+using System;
 using System.IO;
 using System.Threading.Tasks;
 using Dalamud.Game.Command;
@@ -188,10 +189,19 @@ public sealed class Plugin : IDalamudPlugin
         TradeNotificationWindow.IsOpen = true;
     }
 
-    private void OnTradeAccepted(System.Guid offerId, bool isCopy)
+    private void OnTradeAccepted(Guid offerId, bool isCopy, Guid itemId)
     {
-        // If isCopy == false, the sender must remove the item from their inventory.
-        // The InventoryWindow handles removal via TradeNotificationWindow.PendingRemoval.
+        if (!isCopy)
+        {
+            foreach (var bag in Configuration.Bags)
+            {
+                if (bag.Items.RemoveAll(i => i.Id == itemId) > 0)
+                {
+                    Configuration.Save();
+                    break;
+                }
+            }
+        }
         TradeNotificationWindow.OnAccepted(offerId, isCopy);
     }
 
