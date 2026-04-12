@@ -3,5 +3,6 @@ obj/
 bin/
 designDoc/
 RPFrameworkServer/
+release.sh
 .claude/
 *.user
