@@ -237,13 +237,8 @@ public class BgmWindow : Window, IDisposable
             rooms.Add(room);
             selectedRoom = rooms.Count - 1;
             plugin.Configuration.Save();
-            // Sequence: register ownership first, then join — both in one task so order is guaranteed.
             string code = room.Code;
-            Task.Run(async () =>
-            {
-                await plugin.Network.BgmCreateRoomAsync(code);
-                await plugin.Network.BgmJoinAsync(code);
-            });
+            Task.Run(() => plugin.Network.BgmJoinAsync(code, isCreator: true));
             playerWindow.OpenRoom(room, bgmService, autoJoin: false);
             playerWindow.IsOpen = true;
             ImGui.CloseCurrentPopup();

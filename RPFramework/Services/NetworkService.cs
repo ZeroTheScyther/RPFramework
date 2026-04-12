@@ -195,13 +195,10 @@ public class NetworkService : IDisposable
     // BGM
     // ═════════════════════════════════════════════════════════════════════════
 
-    public Task BgmCreateRoomAsync(string code)
-        => SafeInvoke("BgmCreateRoom", code);
-
-    public async Task BgmJoinAsync(string code)
+    public async Task BgmJoinAsync(string code, bool isCreator = false)
     {
         _activeRooms.Add(code);
-        await SafeInvoke("BgmJoin", code);
+        await SafeInvoke("BgmJoin", code, isCreator);
     }
 
     public async Task BgmLeaveAsync(string code)
