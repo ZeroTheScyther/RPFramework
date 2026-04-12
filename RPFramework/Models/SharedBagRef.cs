@@ -12,4 +12,5 @@ public class SharedBagRef
     public Guid   BagId         { get; set; }
     public string OwnerPlayerId { get; set; } = string.Empty;
     public bool   IsOwner       { get; set; }
+    public long   Version       { get; set; } = 0;
 }

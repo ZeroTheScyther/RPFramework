@@ -195,6 +195,9 @@ public class NetworkService : IDisposable
     // BGM
     // ═════════════════════════════════════════════════════════════════════════
 
+    public Task BgmCreateRoomAsync(string code)
+        => SafeInvoke("BgmCreateRoom", code);
+
     public async Task BgmJoinAsync(string code)
     {
         _activeRooms.Add(code);

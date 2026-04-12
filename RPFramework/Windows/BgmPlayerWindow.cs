@@ -539,24 +539,7 @@ public class BgmPlayerWindow : Window, IDisposable
             ImGui.TextUnformatted($"{m.DisplayName}{roleTag}{(isSelf ? " (you)" : "")}");
             if (isSelf) ImGui.PopStyleColor();
 
-            // Owner can promote/demote via right-click
-            if (isAuthority && m.Role != RoomRole.Owner && !isSelf
-                && ImGui.BeginPopupContextItem($"##bgmmc{m.PlayerId}"))
-            {
-                if (m.Role == RoomRole.Admin && ImGui.MenuItem("Demote to Member"))
-                {
-                    if (room != null) Task.Run(() =>
-                        plugin.Network.BgmPromoteMember(room.Code, m.PlayerId, RoomRole.Member));
-                    ImGui.CloseCurrentPopup();
-                }
-                if (m.Role == RoomRole.Member && ImGui.MenuItem("Promote to Admin"))
-                {
-                    if (room != null) Task.Run(() =>
-                        plugin.Network.BgmPromoteMember(room.Code, m.PlayerId, RoomRole.Admin));
-                    ImGui.CloseCurrentPopup();
-                }
-                ImGui.EndPopup();
-            }
+            // Ownership is permanent and cannot be transferred.
         }
     }
 

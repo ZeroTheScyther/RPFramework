@@ -243,12 +243,21 @@ public sealed class Plugin : IDalamudPlugin
                 break;
             case Models.Net.BagOpType.UpdateItem when op.Item != null:
                 var existing = bag.Items.Find(i => i.Id == op.Item.Id);
-                if (existing != null) { existing.Name = op.Item.Name; existing.Amount = op.Item.Amount; }
+                if (existing != null)
+                {
+                    existing.Name        = op.Item.Name;
+                    existing.Description = op.Item.Description;
+                    existing.IconId      = op.Item.IconId;
+                    existing.Amount      = op.Item.Amount;
+                }
                 break;
             case Models.Net.BagOpType.Rename when op.NewName != null:
                 bag.Name = op.NewName;
                 break;
         }
+
+        var sharedRef = Configuration.SharedBags.Find(r => r.BagId == op.BagId);
+        if (sharedRef != null) sharedRef.Version = newVersion;
         Configuration.Save();
     }
 
@@ -265,7 +274,22 @@ public sealed class Plugin : IDalamudPlugin
         if (bag == null) return;
         bag.Items.Clear();
         bag.Items.AddRange(dto.Items.ConvertAll(DtoToItem));
+        var sharedRef = Configuration.SharedBags.Find(r => r.BagId == dto.BagId);
+        if (sharedRef != null) sharedRef.Version = dto.Version;
         Configuration.Save();
+    }
+
+    /// <summary>
+    /// Sends a BagApplyOperation to the server for the given shared bag.
+    /// No-op if the bag is not registered as shared.
+    /// </summary>
+    public void PublishBagOp(Guid bagId, Models.Net.BagOpType opType,
+        Models.Net.RpItemDto? item = null, Guid? itemId = null, string? newName = null)
+    {
+        var sharedRef = Configuration.SharedBags.Find(r => r.BagId == bagId);
+        if (sharedRef == null) return;
+        var op = new Models.Net.BagOperationDto(bagId, sharedRef.Version, opType, item, itemId, newName);
+        Task.Run(() => Network.ApplyBagOperation(op));
     }
 
     // ── Helper ────────────────────────────────────────────────────────────────

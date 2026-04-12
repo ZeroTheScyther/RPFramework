@@ -306,14 +306,21 @@ public class InventoryWindow : Window, IDisposable
 
         if (ImGui.MenuItem("Copy"))
         {
-            bags[ctxBagIdx].Items.Add(new RpItem
+            var copyBag = bags[ctxBagIdx];
+            var copiedItem = new RpItem
             {
                 Name        = ctxItem.Name,
                 Description = ctxItem.Description,
                 IconId      = ctxItem.IconId,
                 Amount      = ctxItem.Amount,
-            });
+            };
+            copyBag.Items.Add(copiedItem);
             plugin.Configuration.Save();
+            if (copyBag.IsShared)
+            {
+                var dto = new RPFramework.Models.Net.RpItemDto(copiedItem.Id, copiedItem.Name, copiedItem.Description, copiedItem.IconId, copiedItem.Amount);
+                plugin.PublishBagOp(copyBag.Id, RPFramework.Models.Net.BagOpType.AddItem, item: dto);
+            }
             ImGui.CloseCurrentPopup();
         }
 
@@ -326,9 +333,19 @@ public class InventoryWindow : Window, IDisposable
                 any = true;
                 if (ImGui.MenuItem(bags[i].Name))
                 {
-                    bags[ctxBagIdx].Items.Remove(ctxItem!);
-                    bags[i].Items.Add(ctxItem!);
+                    var srcBag  = bags[ctxBagIdx];
+                    var destBag = bags[i];
+                    var movedItem = ctxItem!;
+                    srcBag.Items.Remove(movedItem);
+                    destBag.Items.Add(movedItem);
                     plugin.Configuration.Save();
+                    if (srcBag.IsShared)
+                        plugin.PublishBagOp(srcBag.Id, RPFramework.Models.Net.BagOpType.RemoveItem, itemId: movedItem.Id);
+                    if (destBag.IsShared)
+                    {
+                        var dto = new RPFramework.Models.Net.RpItemDto(movedItem.Id, movedItem.Name, movedItem.Description, movedItem.IconId, movedItem.Amount);
+                        plugin.PublishBagOp(destBag.Id, RPFramework.Models.Net.BagOpType.AddItem, item: dto);
+                    }
                     ctxItem = null;
                     ImGui.CloseCurrentPopup();
                 }
@@ -345,8 +362,12 @@ public class InventoryWindow : Window, IDisposable
 
         if (ImGui.MenuItem("Discard"))
         {
-            bags[ctxBagIdx].Items.Remove(ctxItem!);
+            var discardBag = bags[ctxBagIdx];
+            var discardId  = ctxItem!.Id;
+            discardBag.Items.Remove(ctxItem!);
             plugin.Configuration.Save();
+            if (discardBag.IsShared)
+                plugin.PublishBagOp(discardBag.Id, RPFramework.Models.Net.BagOpType.RemoveItem, itemId: discardId);
             ctxItem = null;
             ImGui.CloseCurrentPopup();
         }
@@ -630,23 +651,36 @@ public class InventoryWindow : Window, IDisposable
         if (!canSubmit) ImGui.BeginDisabled();
         if (ImGui.Button(isEditMode ? "Save##rpmodsave" : "Create##rpmodcreate", new Vector2(120, 0)))
         {
+            var modalBag = bags[modalBagIdx];
             if (isEditMode && ctxItem != null)
             {
                 ctxItem.Name        = modalName.Trim();
                 ctxItem.Description = modalDesc.Trim();
                 ctxItem.IconId      = modalIconId;
+                plugin.Configuration.Save();
+                if (modalBag.IsShared)
+                {
+                    var dto = new RPFramework.Models.Net.RpItemDto(ctxItem.Id, ctxItem.Name, ctxItem.Description, ctxItem.IconId, ctxItem.Amount);
+                    plugin.PublishBagOp(modalBag.Id, RPFramework.Models.Net.BagOpType.UpdateItem, item: dto);
+                }
             }
             else
             {
-                bags[modalBagIdx].Items.Add(new RpItem
+                var newItem = new RpItem
                 {
                     Name        = modalName.Trim(),
                     Description = modalDesc.Trim(),
                     IconId      = modalIconId,
                     Amount      = 1,
-                });
+                };
+                modalBag.Items.Add(newItem);
+                plugin.Configuration.Save();
+                if (modalBag.IsShared)
+                {
+                    var dto = new RPFramework.Models.Net.RpItemDto(newItem.Id, newItem.Name, newItem.Description, newItem.IconId, newItem.Amount);
+                    plugin.PublishBagOp(modalBag.Id, RPFramework.Models.Net.BagOpType.AddItem, item: dto);
+                }
             }
-            plugin.Configuration.Save();
             ImGui.CloseCurrentPopup();
         }
         if (!canSubmit) ImGui.EndDisabled();
@@ -766,6 +800,12 @@ public class InventoryWindow : Window, IDisposable
             {
                 ctxItem.Amount = editAmount;
                 plugin.Configuration.Save();
+                var amtBag = bags[ctxBagIdx];
+                if (amtBag.IsShared)
+                {
+                    var dto = new RPFramework.Models.Net.RpItemDto(ctxItem.Id, ctxItem.Name, ctxItem.Description, ctxItem.IconId, ctxItem.Amount);
+                    plugin.PublishBagOp(amtBag.Id, RPFramework.Models.Net.BagOpType.UpdateItem, item: dto);
+                }
             }
             ImGui.CloseCurrentPopup();
         }

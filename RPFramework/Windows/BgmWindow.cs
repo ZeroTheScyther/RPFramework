@@ -208,6 +208,13 @@ public class BgmWindow : Window, IDisposable
             rooms.Add(room);
             selectedRoom = rooms.Count - 1;
             plugin.Configuration.Save();
+            // Register ownership server-side before joining so the owner record exists
+            // when BgmJoin is called inside OpenRoom.
+            if (plugin.Network.IsConnected)
+            {
+                string code = room.Code;
+                System.Threading.Tasks.Task.Run(() => plugin.Network.BgmCreateRoomAsync(code));
+            }
             playerWindow.OpenRoom(room, bgmService);
             playerWindow.IsOpen = true;
             ImGui.CloseCurrentPopup();
