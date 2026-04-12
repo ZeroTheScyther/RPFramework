@@ -6,6 +6,8 @@
     <PackageLicenseExpression>AGPL-3.0-or-later</PackageLicenseExpression>
     <IsPackable>false</IsPackable>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <AssemblyName>RPFramework</AssemblyName>
+    <RootNamespace>RPFramework</RootNamespace>
   </PropertyGroup>
 
   <ItemGroup>

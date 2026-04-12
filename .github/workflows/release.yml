@@ -32,7 +32,7 @@ jobs:
 
             - name: Package
               run: |
-                  $projName = 'SamplePlugin'
+                  $projName = 'RPFramework'
                   $binRoot = 'SamplePlugin/bin'
                   Write-Host "Searching for build output under $binRoot..."
 
