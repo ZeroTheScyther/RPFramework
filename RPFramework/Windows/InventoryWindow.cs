@@ -534,7 +534,8 @@ public class InventoryWindow : Window, IDisposable
     {
         var center = ImGui.GetMainViewport().GetCenter();
         ImGui.SetNextWindowPos(center, ImGuiCond.Appearing, new Vector2(0.5f, 0.5f));
-        ImGui.SetNextWindowSize(new Vector2(420 * ImGuiHelpers.GlobalScale, 0), ImGuiCond.Appearing);
+        float wItem = 420 * ImGuiHelpers.GlobalScale;
+        ImGui.SetNextWindowSizeConstraints(new Vector2(wItem, 0), new Vector2(wItem, float.MaxValue));
 
         if (!ImGui.BeginPopupModal("##rp_item", ref itemModalOpen,
             ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoTitleBar))
@@ -669,6 +670,8 @@ public class InventoryWindow : Window, IDisposable
     {
         var center = ImGui.GetMainViewport().GetCenter();
         ImGui.SetNextWindowPos(center, ImGuiCond.Appearing, new Vector2(0.5f, 0.5f));
+        float wBag = 280 * ImGuiHelpers.GlobalScale;
+        ImGui.SetNextWindowSizeConstraints(new Vector2(wBag, 0), new Vector2(wBag, float.MaxValue));
 
         if (!ImGui.BeginPopupModal("##rp_bag", ref bagModalOpen,
             ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoTitleBar))
@@ -707,6 +710,8 @@ public class InventoryWindow : Window, IDisposable
     {
         var center = ImGui.GetMainViewport().GetCenter();
         ImGui.SetNextWindowPos(center, ImGuiCond.Appearing, new Vector2(0.5f, 0.5f));
+        float wRename = 280 * ImGuiHelpers.GlobalScale;
+        ImGui.SetNextWindowSizeConstraints(new Vector2(wRename, 0), new Vector2(wRename, float.MaxValue));
 
         if (!ImGui.BeginPopupModal("##rp_rename", ref renameModalOpen,
             ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoTitleBar))
@@ -744,6 +749,8 @@ public class InventoryWindow : Window, IDisposable
     {
         var center = ImGui.GetMainViewport().GetCenter();
         ImGui.SetNextWindowPos(center, ImGuiCond.Appearing, new Vector2(0.5f, 0.5f));
+        float wAmount = 220 * ImGuiHelpers.GlobalScale;
+        ImGui.SetNextWindowSizeConstraints(new Vector2(wAmount, 0), new Vector2(wAmount, float.MaxValue));
 
         if (!ImGui.BeginPopupModal("##rp_amount", ref amountModalOpen,
             ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoTitleBar))

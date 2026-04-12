@@ -126,6 +126,8 @@ public class BgmWindow : Window, IDisposable
     {
         var center = ImGui.GetMainViewport().GetCenter();
         ImGui.SetNextWindowPos(center, ImGuiCond.Appearing, new Vector2(0.5f, 0.5f));
+        float w0 = 300 * ImGuiHelpers.GlobalScale;
+        ImGui.SetNextWindowSizeConstraints(new Vector2(w0, 0), new Vector2(w0, float.MaxValue));
 
         if (!ImGui.BeginPopupModal("##bgm_create", ref createOpen,
             ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoTitleBar))

@@ -475,7 +475,8 @@ public class BgmPlayerWindow : Window, IDisposable
 
         var center = ImGui.GetMainViewport().GetCenter();
         ImGui.SetNextWindowPos(center, ImGuiCond.Appearing, new Vector2(0.5f, 0.5f));
-        ImGui.SetNextWindowSize(new Vector2(400 * ImGuiHelpers.GlobalScale, 0), ImGuiCond.Appearing);
+        float w1 = 400 * ImGuiHelpers.GlobalScale;
+        ImGui.SetNextWindowSizeConstraints(new Vector2(w1, 0), new Vector2(w1, float.MaxValue));
 
         if (!ImGui.BeginPopupModal("##bgm_addsong", ref addSongOpen,
             ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoTitleBar))
