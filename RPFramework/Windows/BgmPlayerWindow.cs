@@ -89,14 +89,27 @@ public class BgmPlayerWindow : Window, IDisposable
         members.AddRange(state.Members);
         RefreshAuthority();
 
-        // Non-authority: replace local playlist with the server's authoritative copy.
-        // This covers joining late and reconnecting after being offline while songs were added.
         if (!isAuthority)
         {
+            // Non-authority: replace local playlist with the server's authoritative copy.
+            // This covers joining late and reconnecting after being offline while songs were added.
             room.Playlist.Clear();
             foreach (var dto in state.Playlist)
                 room.Playlist.Add(new RpSong { Id = dto.Id, Title = dto.Title, YoutubeUrl = dto.YoutubeUrl });
             plugin.Configuration.Save();
+        }
+        else if (state.Playlist.Count < room.Playlist.Count)
+        {
+            // Authority reconnecting to a server that lost its state (restart / session expiry).
+            // Re-upload any songs the server is missing.
+            var code    = room.Code;
+            var missing = room.Playlist.GetRange(
+                state.Playlist.Count, room.Playlist.Count - state.Playlist.Count);
+            Task.Run(async () =>
+            {
+                foreach (var s in missing)
+                    await plugin.Network.BgmSendAddSong(code, new RpSongDto(s.Id, s.Title, s.YoutubeUrl));
+            });
         }
 
         // Sync playback: if not authority, apply the owner's state
