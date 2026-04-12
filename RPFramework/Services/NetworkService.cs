@@ -26,6 +26,10 @@ public class NetworkService : IDisposable
     public HubConnectionState State => _conn?.State ?? HubConnectionState.Disconnected;
     public bool IsConnected => State == HubConnectionState.Connected;
 
+    // ── Lifecycle events ─────────────────────────────────────────────────────
+    /// <summary>Fired (on framework thread) whenever a connection is fully established — both initial connect and auto-reconnect.</summary>
+    public event Action? Connected;
+
     // ── BGM events ────────────────────────────────────────────────────────────
     public event Action<RoomStateDto>?              BgmRoomStateReceived;
     public event Action<string, RoomMemberDto>?     BgmMemberJoined;      // code, member
@@ -82,6 +86,7 @@ public class NetworkService : IDisposable
                 await SafeInvoke("Identify", _playerId, _displayName);
                 foreach (var code in _activeRooms) await SafeInvoke("BgmJoin", code);
                 foreach (var id   in _activeBags)  await SafeInvoke("BagShareAccept", id);
+                await Plugin.Framework.RunOnFrameworkThread(() => Connected?.Invoke());
             };
             _conn.Closed += ex =>
             {
@@ -91,6 +96,7 @@ public class NetworkService : IDisposable
 
             await _conn.StartAsync();
             await SafeInvoke("Identify", _playerId, _displayName);
+            await Plugin.Framework.RunOnFrameworkThread(() => Connected?.Invoke());
         }
         finally { _connectLock.Release(); }
     }

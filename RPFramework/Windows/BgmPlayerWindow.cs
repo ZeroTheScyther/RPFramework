@@ -49,6 +49,7 @@ public class BgmPlayerWindow : Window, IDisposable
         plugin.Network.BgmMemberLeft         += OnMemberLeft;
         plugin.Network.BgmMemberRoleChanged  += OnMemberRoleChanged;
         plugin.Network.BgmPlaybackCommand    += OnPlaybackCommand;
+        plugin.Network.Connected             += OnNetworkConnected;
     }
 
     public void OpenRoom(RpRoom rpRoom, BgmService svc)
@@ -57,6 +58,7 @@ public class BgmPlayerWindow : Window, IDisposable
         bgmService = svc;
         WindowName = $"{rpRoom.Name}##RPFramework.BGMPlayer";
         members.Clear();
+        RefreshAuthority(); // correct button state immediately for local-only mode
 
         // Join the room on the relay
         string? localId = plugin.LocalPlayerId;
@@ -71,6 +73,7 @@ public class BgmPlayerWindow : Window, IDisposable
         plugin.Network.BgmMemberLeft        -= OnMemberLeft;
         plugin.Network.BgmMemberRoleChanged -= OnMemberRoleChanged;
         plugin.Network.BgmPlaybackCommand   -= OnPlaybackCommand;
+        plugin.Network.Connected            -= OnNetworkConnected;
     }
 
     // ── Network handlers (called on framework thread) ─────────────────────────
@@ -171,6 +174,14 @@ public class BgmPlayerWindow : Window, IDisposable
         return positionSecs + Math.Max(0, elapsedMs / 1000.0);
     }
 
+    private void OnNetworkConnected()
+    {
+        if (room == null) return;
+        string? localId = plugin.LocalPlayerId;
+        if (localId != null)
+            Task.Run(() => plugin.Network.BgmJoinAsync(room.Code));
+    }
+
     private void RefreshAuthority()
     {
         string? localId = plugin.LocalPlayerId;
@@ -219,7 +230,15 @@ public class BgmPlayerWindow : Window, IDisposable
         {
             ImGui.SameLine();
             ImGui.TextColored(new Vector4(0.6f, 0.6f, 0.6f, 1f), "●");
-            if (ImGui.IsItemHovered()) ImGui.SetTooltip("Not connected — local only");
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip("Not connected — click to connect");
+            if (ImGui.IsItemClicked())
+            {
+                string  url  = plugin.Configuration.ServerUrl;
+                string? id   = plugin.LocalPlayerId;
+                string  name = plugin.LocalDisplayName;
+                if (id != null)
+                    Task.Run(() => plugin.Network.ConnectAsync(url, id, name));
+            }
         }
 
         ImGui.Separator();

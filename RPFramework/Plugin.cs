@@ -1,4 +1,5 @@
 using System.IO;
+using System.Threading.Tasks;
 using Dalamud.Game.Command;
 using Dalamud.IoC;
 using Dalamud.Plugin;
@@ -20,9 +21,10 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] internal static IFramework              Framework       { get; private set; } = null!;
     [PluginService] internal static IPluginLog              Log             { get; private set; } = null!;
 
-    private const string CmdInventory     = "/rpinventory";
+    private const string CmdInventory      = "/rpinventory";
     private const string CmdInventoryShort = "/rpinv";
-    private const string CmdBgm           = "/rpbgm";
+    private const string CmdBgm            = "/rpbgm";
+    private const string DefaultServerUrl  = "https://rpframework.example.com";
 
     public Configuration   Configuration { get; init; }
     public readonly WindowSystem WindowSystem = new("RPFramework");
@@ -77,6 +79,14 @@ public sealed class Plugin : IDalamudPlugin
         PluginInterface.UiBuilder.OpenMainUi   += InventoryWindow.Toggle;
         PluginInterface.UiBuilder.OpenConfigUi += SettingsWindow.Toggle;
         Framework.Update                       += OnFrameworkUpdate;
+        ClientState.Login                      += OnLogin;
+
+        // Auto-connect if the server URL has been configured (i.e. not the default placeholder)
+        if (Configuration.ServerUrl != DefaultServerUrl && LocalPlayerId != null)
+        {
+            string url = Configuration.ServerUrl, id = LocalPlayerId, name = LocalDisplayName;
+            Task.Run(() => Network.ConnectAsync(url, id, name));
+        }
     }
 
     public void Dispose()
@@ -90,6 +100,7 @@ public sealed class Plugin : IDalamudPlugin
         Network.BagStateReceived       -= OnBagStateReceived;
 
         Framework.Update                       -= OnFrameworkUpdate;
+        ClientState.Login                      -= OnLogin;
         PluginInterface.UiBuilder.Draw         -= WindowSystem.Draw;
         PluginInterface.UiBuilder.OpenMainUi   -= InventoryWindow.Toggle;
         PluginInterface.UiBuilder.OpenConfigUi -= SettingsWindow.Toggle;
@@ -110,6 +121,15 @@ public sealed class Plugin : IDalamudPlugin
     }
 
     private void OnFrameworkUpdate(IFramework framework) => BgmService.Update();
+
+    private void OnLogin()
+    {
+        if (Configuration.ServerUrl == DefaultServerUrl || Network.IsConnected) return;
+        string? id = LocalPlayerId;
+        if (id == null) return;
+        string url = Configuration.ServerUrl, name = LocalDisplayName;
+        Task.Run(() => Network.ConnectAsync(url, id, name));
+    }
 
     private void OnInventoryCmd(string command, string args) => InventoryWindow.Toggle();
     private void OnBgmCmd(string command, string args)       => BgmWindow.Toggle();
