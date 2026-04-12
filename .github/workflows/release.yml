@@ -70,9 +70,12 @@ jobs:
                   }
 
                   # Create the zip outside the repo workspace to avoid including the archive inside itself
+                  # Only zip files (not subdirectories) — the SDK creates a plugin-named subfolder with a
+                  # duplicate manifest that we don't want included in the release zip.
                   $destTemp = Join-Path $env:RUNNER_TEMP 'latest.zip'
                   Write-Host "Creating zip at $destTemp"
-                  Compress-Archive -Path (Join-Path $buildDir '*') -DestinationPath $destTemp -Force
+                  $filesToZip = Get-ChildItem -Path $buildDir -File | Select-Object -ExpandProperty FullName
+                  Compress-Archive -Path $filesToZip -DestinationPath $destTemp -Force
 
                   # Copy the artifact into the workspace for the release action to pick it up
                   Copy-Item -Path $destTemp -Destination (Join-Path $env:GITHUB_WORKSPACE 'latest.zip') -Force
