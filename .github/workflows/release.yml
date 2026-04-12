@@ -58,6 +58,12 @@ jobs:
                   }
                   Get-ChildItem -Path $buildDir -Recurse
 
+                  # Remove any existing latest.zip inside the build output to avoid nesting archives
+                  Get-ChildItem -Path $buildDir -Recurse -Filter 'latest.zip' -File -ErrorAction SilentlyContinue | ForEach-Object {
+                    Write-Host "Removing nested archive: $($_.FullName)"
+                    Remove-Item -Path $_.FullName -Force -ErrorAction SilentlyContinue
+                  }
+
                   # Create the zip outside the repo workspace to avoid including the archive inside itself
                   $destTemp = Join-Path $env:RUNNER_TEMP 'latest.zip'
                   Write-Host "Creating zip at $destTemp"
