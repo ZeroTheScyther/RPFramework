@@ -1,6 +1,6 @@
 using System;
 
-namespace SamplePlugin.Models;
+namespace RPFramework.Models;
 
 [Serializable]
 public class RpItem

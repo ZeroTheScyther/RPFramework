@@ -8,10 +8,10 @@ using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
 using Dalamud.Interface.Windowing;
 using Lumina.Excel.Sheets;
-using SamplePlugin.Models;
-using SamplePlugin.Models.Net;
+using RPFramework.Models;
+using RPFramework.Models.Net;
 
-namespace SamplePlugin.Windows;
+namespace RPFramework.Windows;
 
 public class InventoryWindow : Window, IDisposable
 {

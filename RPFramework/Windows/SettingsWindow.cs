@@ -4,9 +4,9 @@ using System.Threading.Tasks;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Utility;
 using Dalamud.Interface.Windowing;
-using SamplePlugin.Services;
+using RPFramework.Services;
 
-namespace SamplePlugin.Windows;
+namespace RPFramework.Windows;
 
 public class SettingsWindow : Window, IDisposable
 {

@@ -33,15 +33,15 @@ jobs:
                   Expand-Archive -Force dalamud.zip "$env:AppData\XIVLauncher\addon\Hooks\dev"
 
             - name: Build
-              run: dotnet build SamplePlugin/SamplePlugin.csproj --configuration Release
+              run: dotnet build RPFramework/RPFramework.csproj --configuration Release
 
             - name: Package
               run: |
                   $projName = 'RPFramework'
-                  $binRoot = 'SamplePlugin/bin'
+                  $binRoot = 'RPFramework/bin'
                   Write-Host "Searching for build output under $binRoot..."
 
-                  # Prefer the directory that contains the project's DLL (SamplePlugin.dll)
+                  # Prefer the directory that contains the project DLL
                   $target = Get-ChildItem -Path $binRoot -Recurse -Filter "$projName.dll" -File -ErrorAction SilentlyContinue | Select-Object -First 1
                   if ($target) {
                     $buildDir = $target.Directory.FullName

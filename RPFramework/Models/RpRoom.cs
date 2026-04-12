@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 
-namespace SamplePlugin.Models;
+namespace RPFramework.Models;
 
 [Serializable]
 public class RpRoom

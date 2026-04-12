@@ -1,4 +1,4 @@
-name: Sample PR Builder for SamplePlugin
+name: PR Builder
 
 on:
   pull_request:
@@ -10,7 +10,7 @@ jobs:
     runs-on: windows-2022
 
     env:
-      Solution_Name: SamplePlugin
+      Solution_Name: RPFramework
 
     steps:
     - name: Checkout
@@ -27,13 +27,13 @@ jobs:
         Expand-Archive -Force latest.zip "$env:AppData\XIVLauncher\addon\Hooks\dev"
 
     - name: Build with dotnet
-      run: dotnet build --configuration Release
+      run: dotnet build RPFramework/RPFramework.csproj --configuration Release
 
     - name: Store artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: SamplePlugin
-        path: .\SamplePlugin\bin\x64\Release\RPFramework\*
+        name: RPFramework
+        path: .\RPFramework\bin\x64\Release\RPFramework\*
         if-no-files-found: error
         retention-days: 1
 

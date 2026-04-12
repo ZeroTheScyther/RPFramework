@@ -6,11 +6,11 @@ using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
 using Dalamud.Interface.Windowing;
-using SamplePlugin.Models;
-using SamplePlugin.Models.Net;
-using SamplePlugin.Services;
+using RPFramework.Models;
+using RPFramework.Models.Net;
+using RPFramework.Services;
 
-namespace SamplePlugin.Windows;
+namespace RPFramework.Windows;
 
 public class BgmPlayerWindow : Window, IDisposable
 {

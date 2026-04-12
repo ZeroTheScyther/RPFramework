@@ -1,76 +1,75 @@
-> ⚠️ **Don't click Fork!**
-> 
-> This is a GitHub Template repo. If you want to use this for a plugin, [use this template][new-repo] to make a new repo!
->
-> ![image](https://github.com/goatcorp/SamplePlugin/assets/16760685/d9732094-e1ed-4769-a70b-58ed2b92580c)
+# RPFramework
 
-# SamplePlugin
+A roleplay toolkit plugin for FINAL FANTASY XIV, built on [Dalamud](https://github.com/goatcorp/Dalamud).
 
-[![Use This Template badge](https://img.shields.io/badge/Use%20This%20Template-0?logo=github&labelColor=grey)][new-repo]
+## Features
 
+### RP Inventory (`/rpinv` or `/rpinventory`)
+A custom item bag system separate from your real FFXIV inventory, designed for roleplay items that don't exist in-game.
 
-Simple example plugin for Dalamud.
+- Create and manage multiple named bags
+- Add custom items with names, descriptions, amounts, and game icons
+- Right-click items to edit, delete, trade, or send a copy
+- Right-click bag tabs to rename, delete, share, or dissolve
+- Track a Gil balance displayed at the bottom of the inventory
+- Trade items directly to other RPFramework users via the relay server (item removed from your inventory, or send a copy to keep it)
+- Share bags with other players for collaborative access — all participants see live updates
 
-This is not designed to be the simplest possible example, but it is also not designed to cover everything you might want to do. For more detailed questions, come ask in [the Discord](https://discord.gg/holdshift).
+### RP BGM (`/rpbgm`)
+A synchronized music player that lets a group of players listen to the same YouTube audio together in real time.
 
-## Main Points
+- Create or join a named room
+- Build a shared playlist from YouTube URLs (audio cached locally, no re-downloads)
+- Owner/Admin controls: play, pause, stop, seek, previous/next, loop modes (None/Single/All)
+- Members automatically follow the room owner's playback state with latency compensation
+- Promote members to Admin to share transport controls
+- BGM cache stored in your Dalamud config folder — clear it any time from Settings
 
-* Simple functional plugin
-  * Slash command
-  * Main UI
-  * Settings UI
-  * Image loading
-  * Plugin json
-* Simple, slightly-improved plugin configuration handling
-* Project organization
-  * Copies all necessary plugin files to the output directory
-    * Does not copy dependencies that are provided by dalamud
-    * Output directory can be zipped directly and have exactly what is required
-  * Hides data files from visual studio to reduce clutter
-    * Also allows having data files in different paths than VS would usually allow if done in the IDE directly
+### Settings
+Open via the gear icon in Dalamud or `/xlsettings` → plugin config.
 
+- Configure the relay server URL
+- Connect/disconnect from the relay server
+- View and clear the BGM audio cache
 
-The intention is less that any of this is used directly in other projects, and more to show how similar things can be done.
+## Installation
 
-## How To Use
+RPFramework is distributed via a custom Dalamud plugin repository.
 
-### Getting Started
+1. Open Dalamud Settings (`/xlsettings`) → **Experimental**
+2. Under **Custom Plugin Repositories**, add:
+   ```
+   https://raw.githubusercontent.com/ZeroTheScyther/RPFramework/master/repo.json
+   ```
+3. Click the **+** button, then **Save**
+4. Open the Plugin Installer (`/xlplugins`), search for **RPFramework**, and install
 
-To begin, [clone this template repository][new-repo] to your own GitHub account. This will automatically bring in everything you need to get a jumpstart on development. You do not need to fork this repository unless you intend to contribute modifications to it.
+## Relay Server
 
-Be sure to also check out the [Dalamud Developer Docs][dalamud-docs] for helpful information about building your own plugin. The Developer Docs includes helpful information about all sorts of things, including [how to submit][submit] your newly-created plugin to the official repository. Assuming you use this template repository, the provided project build configuration and license are already chosen to make everything a breeze.
+Multiplayer features (trading, shared bags, BGM sync) require a running instance of **RPFrameworkServer** — an ASP.NET Core SignalR server included in this repository under `RPFrameworkServer/`.
 
-[new-repo]: https://github.com/new?template_name=SamplePlugin&template_owner=goatcorp
-[dalamud-docs]: https://dalamud.dev
-[submit]: https://dalamud.dev/plugin-publishing/submission
+You can host it yourself or use a shared community instance. Set the server URL in the plugin's Settings window and click **Connect** while logged in to FFXIV.
+
+## Building from Source
 
 ### Prerequisites
+- [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)
+- XIVLauncher with Dalamud installed and run at least once
 
-SamplePlugin assumes all the following prerequisites are met:
+### Build
 
-* XIVLauncher, FINAL FANTASY XIV, and Dalamud have all been installed and the game has been run with Dalamud at least once.
-* XIVLauncher is installed to its default directories and configurations.
-  * If a custom path is required for Dalamud's dev directory, it must be set with the `DALAMUD_HOME` environment variable.
-* A .NET Core 8 SDK has been installed and configured, or is otherwise available. (In most cases, the IDE will take care of this.)
+```bash
+~/.dotnet/dotnet build RPFramework/RPFramework.csproj --configuration Release
+```
 
-### Building
+The output will be at `RPFramework/bin/x64/Release/RPFramework/`.
 
-1. Open up `SamplePlugin.sln` in your C# editor of choice (likely [Visual Studio 2022](https://visualstudio.microsoft.com) or [JetBrains Rider](https://www.jetbrains.com/rider/)).
-2. Build the solution. By default, this will build a `Debug` build, but you can switch to `Release` in your IDE.
-3. The resulting plugin can be found at `SamplePlugin/bin/x64/Debug/SamplePlugin.dll` (or `Release` if appropriate.)
+### Loading as a dev plugin
 
-### Activating in-game
+1. Open Dalamud Settings → **Experimental**
+2. Add the full path to `RPFramework.dll` under **Dev Plugin Locations**
+3. Open the Plugin Installer → **Dev Tools → Installed Dev Plugins** and enable it
 
-1. Launch the game and use `/xlsettings` in chat or `xlsettings` in the Dalamud Console to open up the Dalamud settings.
-    * In here, go to `Experimental`, and add the full path to the `SamplePlugin.dll` to the list of Dev Plugin Locations.
-2. Next, use `/xlplugins` (chat) or `xlplugins` (console) to open up the Plugin Installer.
-    * In here, go to `Dev Tools > Installed Dev Plugins`, and the `SamplePlugin` should be visible. Enable it.
-3. You should now be able to use `/pmycommand` (chat) or `pmycommand` (console)!
+## License
 
-Note that you only need to add it to the Dev Plugin Locations once (Step 1); it is preserved afterwards. You can disable, enable, or load your plugin on startup through the Plugin Installer.
-
-### Reconfiguring for your own uses
-
-Replace all references to `SamplePlugin` in all the files and filenames with your desired name, then start building the plugin of your dreams. You'll figure it out 😁
-
-Dalamud will load the JSON file (by default, `SamplePlugin/SamplePlugin.json`) next to your DLL and use it for metadata, including the description for your plugin in the Plugin Installer. Make sure to update this with information relevant to _your_ plugin!
+[AGPL-3.0](LICENSE.md)

@@ -1,6 +1,6 @@
 using System;
 
-namespace SamplePlugin.Models;
+namespace RPFramework.Models;
 
 /// <summary>
 /// Persisted reference to a shared bag session.

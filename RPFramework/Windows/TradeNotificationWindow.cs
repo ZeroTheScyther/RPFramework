@@ -4,9 +4,9 @@ using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Utility;
 using Dalamud.Interface.Windowing;
-using SamplePlugin.Models.Net;
+using RPFramework.Models.Net;
 
-namespace SamplePlugin.Windows;
+namespace RPFramework.Windows;
 
 public class TradeNotificationWindow : Window, IDisposable
 {

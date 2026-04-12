@@ -1,9 +1,9 @@
 using Dalamud.Configuration;
 using System;
 using System.Collections.Generic;
-using SamplePlugin.Models;
+using RPFramework.Models;
 
-namespace SamplePlugin;
+namespace RPFramework;
 
 [Serializable]
 public class Configuration : IPluginConfiguration

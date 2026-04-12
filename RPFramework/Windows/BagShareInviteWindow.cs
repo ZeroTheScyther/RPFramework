@@ -4,10 +4,10 @@ using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Utility;
 using Dalamud.Interface.Windowing;
-using SamplePlugin.Models;
-using SamplePlugin.Models.Net;
+using RPFramework.Models;
+using RPFramework.Models.Net;
 
-namespace SamplePlugin.Windows;
+namespace RPFramework.Windows;
 
 public class BagShareInviteWindow : Window, IDisposable
 {

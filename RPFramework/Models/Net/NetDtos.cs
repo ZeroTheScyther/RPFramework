@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 
-namespace SamplePlugin.Models.Net;
+namespace RPFramework.Models.Net;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Wire DTOs — mirrors RPFrameworkServer/Models/Dto.cs

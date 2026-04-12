@@ -4,10 +4,10 @@ using Dalamud.IoC;
 using Dalamud.Plugin;
 using Dalamud.Interface.Windowing;
 using Dalamud.Plugin.Services;
-using SamplePlugin.Services;
-using SamplePlugin.Windows;
+using RPFramework.Services;
+using RPFramework.Windows;
 
-namespace SamplePlugin;
+namespace RPFramework;
 
 public sealed class Plugin : IDalamudPlugin
 {

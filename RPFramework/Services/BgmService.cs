@@ -9,11 +9,11 @@ using System.Threading;
 using System.Threading.Tasks;
 using NAudio.Wave;
 using NAudio.Wave.SampleProviders;
-using SamplePlugin.Models;
+using RPFramework.Models;
 using YoutubeExplode;
 using YoutubeExplode.Videos;
 
-namespace SamplePlugin.Services;
+namespace RPFramework.Services;
 
 /// <summary>
 /// Handles audio playback for RPBGM.

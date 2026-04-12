@@ -3,9 +3,9 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.SignalR.Client;
-using SamplePlugin.Models.Net;
+using RPFramework.Models.Net;
 
-namespace SamplePlugin.Services;
+namespace RPFramework.Services;
 
 /// <summary>
 /// Manages the SignalR connection to the RPFramework relay server.

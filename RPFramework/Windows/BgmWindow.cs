@@ -5,10 +5,10 @@ using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
 using Dalamud.Interface.Windowing;
-using SamplePlugin.Models;
-using SamplePlugin.Services;
+using RPFramework.Models;
+using RPFramework.Services;
 
-namespace SamplePlugin.Windows;
+namespace RPFramework.Windows;
 
 public class BgmWindow : Window, IDisposable
 {
