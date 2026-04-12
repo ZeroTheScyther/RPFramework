@@ -1,12 +1,16 @@
 {
-  "Author": "your name here",
-  "Name": "Sample Plugin",
-  "Punchline": "A short one-liner that shows up in /xlplugins.",
-  "Description": "A description that shows up in /xlplugins. List any major slash-command(s).",
+  "InternalName": "SamplePlugin",
+  "Author": "ZeroTheScyther",
+  "Name": "RPFramework",
+  "Punchline": "RP tools for FFXIV — custom inventory, dice rolls, and more.",
+  "Description": "RPFramework provides roleplay helpers including a custom item inventory (/rpinv or /rpinventory), a synced BGM player (/rpbgm), inventory trading and shared bags over a relay server, and more modules coming soon.",
   "ApplicableVersion": "any",
+  "DalamudApiLevel": 10,
   "Tags": [
-    "sample",
-    "plugin",
-    "goats"
+    "rp",
+    "roleplay",
+    "inventory",
+    "bgm",
+    "tools"
   ]
 }

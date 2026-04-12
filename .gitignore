@@ -1,4 +1,7 @@
 .vs/
 obj/
 bin/
+designDoc/
+RPFrameworkServer/
+.claude/
 *.user
