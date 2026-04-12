@@ -32,14 +32,14 @@ jobs:
 
             - name: Package
               run: |
-                  $src = "/SamplePlugin/bin/Debug*"
+                  $src = (Get-ChildItem -Path "SamplePlugin/bin" -Recurse -Directory | Where-Object { $_.FullName -match '[/\\]Release' } | Select-Object -First 1 -ExpandProperty FullName)
                   Write-Host "Checking output directory:"
                   Get-ChildItem -Path $src -Recurse
                   if (-not (Test-Path $src)) {
                     Write-Error "Output directory $src does not exist!"
                     exit 1
                   }
-                  Compress-Archive -Path "$src\*" -DestinationPath latest.zip
+                  Compress-Archive -Path (Join-Path $src '*') -DestinationPath latest.zip -Force
 
             - name: Create GitHub Release
               uses: softprops/action-gh-release@v2
