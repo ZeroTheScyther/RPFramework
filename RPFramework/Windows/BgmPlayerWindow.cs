@@ -184,20 +184,22 @@ public class BgmPlayerWindow : Window, IDisposable
         if (bgmService == null || room == null) return;
         double adjusted = AdjustedPosition(positionSeconds, serverTimestamp);
 
-        if (songIndex >= 0 && songIndex < room.Playlist.Count && songIndex != bgmService.CurrentSongIndex)
+        bool wrongSong = songIndex != bgmService.CurrentSongIndex || bgmService.CurrentRoom != room;
+
+        if (isPlaying)
         {
-            bgmService.PlayRoom(room, songIndex);
-            // SeekTo after load is handled by the pending seek in LoadAndPlayAsync
+            if (songIndex >= 0 && songIndex < room.Playlist.Count && wrongSong)
+                bgmService.PlayRoom(room, songIndex); // load correct song; seek handled post-load
+            else
+            {
+                bgmService.SeekTo(adjusted);          // snap to owner's position unconditionally
+                if (!bgmService.IsPlaying) bgmService.PlayPause();
+            }
         }
-        else if (isPlaying && !bgmService.IsPlaying)
+        else
         {
+            if (bgmService.IsPlaying) bgmService.PlayPause(); // force pause/stop
             bgmService.SeekTo(adjusted);
-            bgmService.PlayPause();
-        }
-        else if (!isPlaying && bgmService.IsPlaying)
-        {
-            bgmService.SeekTo(adjusted);
-            bgmService.PlayPause();
         }
     }
 
@@ -445,7 +447,7 @@ public class BgmPlayerWindow : Window, IDisposable
 
             if (isCurrent) ImGui.PopStyleColor();
 
-            if (sel && ImGui.IsMouseDoubleClicked(ImGuiMouseButton.Left))
+            if (sel && ImGui.IsMouseDoubleClicked(ImGuiMouseButton.Left) && isAuthority)
             {
                 bgmService.PlayRoom(room!, i);
                 SyncPlay();
