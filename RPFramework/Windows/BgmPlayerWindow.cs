@@ -63,9 +63,8 @@ public class BgmPlayerWindow : Window, IDisposable
         members.Clear();
         RefreshAuthority(); // correct button state immediately for local-only mode
 
-        // Join the room on the relay
-        string? localId = plugin.LocalPlayerId;
-        if (localId != null && plugin.Network.IsConnected)
+        // Join the room on the relay — Identify already ran at connect time, no need to re-check LocalPlayerId
+        if (plugin.Network.IsConnected)
             Task.Run(() => plugin.Network.BgmJoinAsync(rpRoom.Code));
     }
 
@@ -237,9 +236,8 @@ public class BgmPlayerWindow : Window, IDisposable
     private void OnNetworkConnected()
     {
         if (room == null) return;
-        string? localId = plugin.LocalPlayerId;
-        if (localId != null)
-            Task.Run(() => plugin.Network.BgmJoinAsync(room.Code));
+        // Identify already ran during ConnectAsync — no need to re-check LocalPlayerId here
+        Task.Run(() => plugin.Network.BgmJoinAsync(room.Code));
     }
 
     private void OnNetworkReconnected()
