@@ -208,6 +208,8 @@ public class BgmWindow : Window, IDisposable
             rooms.Add(room);
             selectedRoom = rooms.Count - 1;
             plugin.Configuration.Save();
+            playerWindow.OpenRoom(room, bgmService);
+            playerWindow.IsOpen = true;
             ImGui.CloseCurrentPopup();
         }
         if (!canCreate) ImGui.EndDisabled();

@@ -49,6 +49,8 @@ public class BgmPlayerWindow : Window, IDisposable
         plugin.Network.BgmMemberLeft         += OnMemberLeft;
         plugin.Network.BgmMemberRoleChanged  += OnMemberRoleChanged;
         plugin.Network.BgmPlaybackCommand    += OnPlaybackCommand;
+        plugin.Network.BgmSongAdded          += OnSongAdded;
+        plugin.Network.BgmSongRemoved        += OnSongRemoved;
         plugin.Network.Connected             += OnNetworkConnected;
     }
 
@@ -73,6 +75,8 @@ public class BgmPlayerWindow : Window, IDisposable
         plugin.Network.BgmMemberLeft        -= OnMemberLeft;
         plugin.Network.BgmMemberRoleChanged -= OnMemberRoleChanged;
         plugin.Network.BgmPlaybackCommand   -= OnPlaybackCommand;
+        plugin.Network.BgmSongAdded         -= OnSongAdded;
+        plugin.Network.BgmSongRemoved       -= OnSongRemoved;
         plugin.Network.Connected            -= OnNetworkConnected;
     }
 
@@ -111,6 +115,25 @@ public class BgmPlayerWindow : Window, IDisposable
         var idx = members.FindIndex(m => m.PlayerId == updated.PlayerId);
         if (idx >= 0) members[idx] = updated;
         RefreshAuthority();
+    }
+
+    private void OnSongAdded(string code, RpSongDto dto, int idx)
+    {
+        if (room?.Code != code || isAuthority) return; // authority already added it locally
+        if (room.Playlist.Exists(s => s.Id == dto.Id)) return;
+        var song = new RpSong { Id = dto.Id, Title = dto.Title, YoutubeUrl = dto.YoutubeUrl };
+        if (idx >= 0 && idx <= room.Playlist.Count)
+            room.Playlist.Insert(idx, song);
+        else
+            room.Playlist.Add(song);
+        plugin.Configuration.Save();
+    }
+
+    private void OnSongRemoved(string code, Guid songId)
+    {
+        if (room?.Code != code || isAuthority) return;
+        room.Playlist.RemoveAll(s => s.Id == songId);
+        plugin.Configuration.Save();
     }
 
     private void OnPlaybackCommand(string code, PlaybackCommandDto cmd)
@@ -185,9 +208,14 @@ public class BgmPlayerWindow : Window, IDisposable
     private void RefreshAuthority()
     {
         string? localId = plugin.LocalPlayerId;
-        if (localId == null) { isAuthority = true; return; } // offline → act as authority locally
+        if (localId == null) { isAuthority = true; return; } // not logged in → local only
+
+        // No server connection → act as local authority (no one to sync with)
+        if (!plugin.Network.IsConnected) { isAuthority = true; return; }
+
+        // Connected: only grant authority if the server has explicitly said so
         var self = members.Find(m => m.PlayerId == localId);
-        isAuthority = self == null || self.Role is RoomRole.Owner or RoomRole.Admin;
+        isAuthority = self?.Role is RoomRole.Owner or RoomRole.Admin;
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -330,7 +358,10 @@ public class BgmPlayerWindow : Window, IDisposable
         float vol = room.Volume * 100f;
         ImGui.SetNextItemWidth(-1);
         if (ImGui.SliderFloat("##bgmvol", ref vol, 0f, 100f, "%.0f%%"))
-            bgmService.SetVolume(vol / 100f);
+        {
+            room.Volume = vol / 100f;
+            bgmService.SetVolume(room.Volume);
+        }
         if (ImGui.IsItemHovered()) ImGui.SetTooltip("Volume (local only)");
     }
 
