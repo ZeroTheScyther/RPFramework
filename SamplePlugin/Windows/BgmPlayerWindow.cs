@@ -387,7 +387,7 @@ public class BgmPlayerWindow : Window, IDisposable
 
             if (sel && ImGui.IsMouseDoubleClicked(ImGuiMouseButton.Left))
             {
-                bgmService.PlayRoom(room, i);
+                bgmService.PlayRoom(room!, i);
                 SyncPlay();
             }
 

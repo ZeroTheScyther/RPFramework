@@ -479,7 +479,7 @@ public class InventoryWindow : Window, IDisposable
 
         ImGui.Separator();
 
-        bool canDeleteBag = bags.Count > 1 && !ctxTabBag.IsShared;
+        bool canDeleteBag = bags.Count > 1 && !ctxTabBag!.IsShared;
         if (!canDeleteBag) ImGui.BeginDisabled();
         if (ImGui.MenuItem("Delete"))
         {
