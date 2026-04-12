@@ -32,14 +32,40 @@ jobs:
 
             - name: Package
               run: |
-                  $src = (Get-ChildItem -Path "SamplePlugin/bin" -Recurse -Directory | Where-Object { $_.FullName -match '[/\\]Release' } | Select-Object -First 1 -ExpandProperty FullName)
-                  Write-Host "Checking output directory:"
-                  Get-ChildItem -Path $src -Recurse
-                  if (-not (Test-Path $src)) {
-                    Write-Error "Output directory $src does not exist!"
+                  $projName = 'SamplePlugin'
+                  $binRoot = 'SamplePlugin/bin'
+                  Write-Host "Searching for build output under $binRoot..."
+
+                  # Prefer the directory that contains the project's DLL (SamplePlugin.dll)
+                  $target = Get-ChildItem -Path $binRoot -Recurse -Filter "$projName.dll" -File -ErrorAction SilentlyContinue | Select-Object -First 1
+                  if ($target) {
+                    $buildDir = $target.Directory.FullName
+                  } else {
+                    # Fallback to any dll/exe found
+                    $target = Get-ChildItem -Path $binRoot -Recurse -Include '*.dll','*.exe' -File -ErrorAction SilentlyContinue | Select-Object -First 1
+                    if ($target) { $buildDir = $target.Directory.FullName }
+                  }
+
+                  if (-not $buildDir) {
+                    Write-Host "No project-specific output found; falling back to first Release directory"
+                    $buildDir = Get-ChildItem -Path $binRoot -Recurse -Directory | Where-Object { $_.FullName -match '[/\\]Release' } | Select-Object -First 1 -ExpandProperty FullName
+                  }
+
+                  Write-Host "Using build output: $buildDir"
+                  if (-not (Test-Path $buildDir)) {
+                    Write-Error "Output directory $buildDir does not exist!"
                     exit 1
                   }
-                  Compress-Archive -Path (Join-Path $src '*') -DestinationPath latest.zip -Force
+                  Get-ChildItem -Path $buildDir -Recurse
+
+                  # Create the zip outside the repo workspace to avoid including the archive inside itself
+                  $destTemp = Join-Path $env:RUNNER_TEMP 'latest.zip'
+                  Write-Host "Creating zip at $destTemp"
+                  Compress-Archive -Path (Join-Path $buildDir '*') -DestinationPath $destTemp -Force
+
+                  # Copy the artifact into the workspace for the release action to pick it up
+                  Copy-Item -Path $destTemp -Destination (Join-Path $env:GITHUB_WORKSPACE 'latest.zip') -Force
+                  Write-Host "Copied artifact to $env:GITHUB_WORKSPACE\latest.zip"
 
             - name: Create GitHub Release
               uses: softprops/action-gh-release@v2
