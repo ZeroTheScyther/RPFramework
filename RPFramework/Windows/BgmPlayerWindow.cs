@@ -52,6 +52,7 @@ public class BgmPlayerWindow : Window, IDisposable
         plugin.Network.BgmSongAdded          += OnSongAdded;
         plugin.Network.BgmSongRemoved        += OnSongRemoved;
         plugin.Network.Connected             += OnNetworkConnected;
+        plugin.Network.Reconnected           += OnNetworkReconnected;
     }
 
     public void OpenRoom(RpRoom rpRoom, BgmService svc)
@@ -78,6 +79,7 @@ public class BgmPlayerWindow : Window, IDisposable
         plugin.Network.BgmSongAdded         -= OnSongAdded;
         plugin.Network.BgmSongRemoved       -= OnSongRemoved;
         plugin.Network.Connected            -= OnNetworkConnected;
+        plugin.Network.Reconnected          -= OnNetworkReconnected;
     }
 
     // ── Network handlers (called on framework thread) ─────────────────────────
@@ -91,11 +93,19 @@ public class BgmPlayerWindow : Window, IDisposable
 
         if (!isAuthority)
         {
-            // Non-authority: replace local playlist with the server's authoritative copy.
-            // This covers joining late and reconnecting after being offline while songs were added.
-            room.Playlist.Clear();
-            foreach (var dto in state.Playlist)
-                room.Playlist.Add(new RpSong { Id = dto.Id, Title = dto.Title, YoutubeUrl = dto.YoutubeUrl });
+            // Non-authority: merge server playlist by ID to avoid wiping songs that
+            // arrived via OnSongAdded before this state packet completed.
+            var serverIds = new System.Collections.Generic.HashSet<Guid>(
+                state.Playlist.ConvertAll(d => d.Id));
+            room.Playlist.RemoveAll(s => !serverIds.Contains(s.Id));
+            for (int i = 0; i < state.Playlist.Count; i++)
+            {
+                var dto = state.Playlist[i];
+                if (!room.Playlist.Exists(s => s.Id == dto.Id))
+                    room.Playlist.Insert(
+                        Math.Min(i, room.Playlist.Count),
+                        new RpSong { Id = dto.Id, Title = dto.Title, YoutubeUrl = dto.YoutubeUrl });
+            }
             plugin.Configuration.Save();
         }
         else if (state.Playlist.Count < room.Playlist.Count)
@@ -142,7 +152,9 @@ public class BgmPlayerWindow : Window, IDisposable
 
     private void OnSongAdded(string code, RpSongDto dto, int idx)
     {
-        if (room?.Code != code || isAuthority) return; // authority already added it locally
+        if (room?.Code != code) return;
+        // Server sends OnBgmSongAdded to OthersInGroup, so authority normally won't receive this.
+        // Dedup by Id handles any edge case where it arrives anyway.
         if (room.Playlist.Exists(s => s.Id == dto.Id)) return;
         var song = new RpSong { Id = dto.Id, Title = dto.Title, YoutubeUrl = dto.YoutubeUrl };
         if (idx >= 0 && idx <= room.Playlist.Count)
@@ -154,7 +166,7 @@ public class BgmPlayerWindow : Window, IDisposable
 
     private void OnSongRemoved(string code, Guid songId)
     {
-        if (room?.Code != code || isAuthority) return;
+        if (room?.Code != code) return;
         room.Playlist.RemoveAll(s => s.Id == songId);
         plugin.Configuration.Save();
     }
@@ -228,6 +240,14 @@ public class BgmPlayerWindow : Window, IDisposable
         string? localId = plugin.LocalPlayerId;
         if (localId != null)
             Task.Run(() => plugin.Network.BgmJoinAsync(room.Code));
+    }
+
+    private void OnNetworkReconnected()
+    {
+        // NetworkService already re-sent BgmJoin during reconnect — do NOT call BgmJoinAsync again
+        // (that would trigger a second OnBgmRoomState with 0 songs, clearing the playlist).
+        // Just reset authority until the incoming OnBgmRoomState re-establishes it.
+        isAuthority = false;
     }
 
     private void RefreshAuthority()

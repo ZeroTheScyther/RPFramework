@@ -27,8 +27,11 @@ public class NetworkService : IDisposable
     public bool IsConnected => State == HubConnectionState.Connected;
 
     // ── Lifecycle events ─────────────────────────────────────────────────────
-    /// <summary>Fired (on framework thread) whenever a connection is fully established — both initial connect and auto-reconnect.</summary>
+    /// <summary>Fired (on framework thread) when an initial connection is established.</summary>
     public event Action? Connected;
+
+    /// <summary>Fired (on framework thread) after an automatic reconnect completes. Rooms are already re-joined by NetworkService — subscribers must NOT call BgmJoinAsync again.</summary>
+    public event Action? Reconnected;
 
     // ── BGM events ────────────────────────────────────────────────────────────
     public event Action<RoomStateDto>?              BgmRoomStateReceived;
@@ -86,7 +89,8 @@ public class NetworkService : IDisposable
                 await SafeInvoke("Identify", _playerId, _displayName);
                 foreach (var code in _activeRooms) await SafeInvoke("BgmJoin", code);
                 foreach (var id   in _activeBags)  await SafeInvoke("BagShareAccept", id);
-                await Plugin.Framework.RunOnFrameworkThread(() => Connected?.Invoke());
+                // Fire Reconnected (NOT Connected) — rooms already re-joined, subscribers must not call BgmJoinAsync again
+                await Plugin.Framework.RunOnFrameworkThread(() => Reconnected?.Invoke());
             };
             _conn.Closed += ex =>
             {
