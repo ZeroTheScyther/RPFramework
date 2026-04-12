@@ -1,42 +1,48 @@
 name: Release RPFramework
 
 on:
-  push:
-    tags:
-      - 'v*'
+    push:
+        tags:
+            - "v*"
 
 permissions:
-  contents: write
+    contents: write
 
 jobs:
+    build:
+        runs-on: windows-2022
 
-  build:
-    runs-on: windows-2022
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v5
 
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v5
+            - name: Install .NET
+              uses: actions/setup-dotnet@v5
+              with:
+                  dotnet-version: 10.0.x
+                  include-prerelease: true
 
-    - name: Install .NET
-      uses: actions/setup-dotnet@v5
-      with:
-        dotnet-version: 10.0.x
+            - name: Download Dalamud
+              run: |
+                  Invoke-WebRequest -Uri https://goatcorp.github.io/dalamud-distrib/latest.zip -OutFile dalamud.zip
+                  Expand-Archive -Force dalamud.zip "$env:AppData\XIVLauncher\addon\Hooks\dev"
 
-    - name: Download Dalamud
-      run: |
-        Invoke-WebRequest -Uri https://goatcorp.github.io/dalamud-distrib/latest.zip -OutFile dalamud.zip
-        Expand-Archive -Force dalamud.zip "$env:AppData\XIVLauncher\addon\Hooks\dev"
+            - name: Build
+              run: dotnet build SamplePlugin/SamplePlugin.csproj --configuration Release
 
-    - name: Build
-      run: dotnet build SamplePlugin/SamplePlugin.csproj --configuration Release
+            - name: Package
+              run: |
+                  $src = "SamplePlugin\bin\x64\Release"
+                  Write-Host "Checking output directory:"
+                  Get-ChildItem -Path $src -Recurse
+                  if (-not (Test-Path $src)) {
+                    Write-Error "Output directory $src does not exist!"
+                    exit 1
+                  }
+                  Compress-Archive -Path "$src\*" -DestinationPath latest.zip
 
-    - name: Package
-      run: |
-        $src = "SamplePlugin\bin\x64\Release\SamplePlugin"
-        Compress-Archive -Path "$src\*" -DestinationPath latest.zip
-
-    - name: Create GitHub Release
-      uses: softprops/action-gh-release@v2
-      with:
-        files: latest.zip
-        generate_release_notes: true
+            - name: Create GitHub Release
+              uses: softprops/action-gh-release@v2
+              with:
+                  files: latest.zip
+                  generate_release_notes: true
