@@ -20,6 +20,10 @@ public class BgmWindow : Window, IDisposable
     private string newRoomName  = string.Empty;
     private bool   pendingCreate;
     private bool   createOpen   = true;
+    private string joinCode     = string.Empty;
+    private string joinName     = string.Empty;
+    private bool   pendingJoin;
+    private bool   joinOpen     = true;
 
     public BgmWindow(Plugin plugin, BgmService bgmService, BgmPlayerWindow playerWindow)
         : base("RP BGM##RPFramework.BGM")
@@ -42,6 +46,7 @@ public class BgmWindow : Window, IDisposable
     public override void Draw()
     {
         if (pendingCreate) { createOpen = true; ImGui.OpenPopup("##bgm_create"); pendingCreate = false; }
+        if (pendingJoin)   { joinOpen   = true; ImGui.OpenPopup("##bgm_join");   pendingJoin   = false; }
 
         var rooms = plugin.Configuration.Rooms;
         if (selectedRoom >= rooms.Count) selectedRoom = rooms.Count - 1;
@@ -112,14 +117,69 @@ public class BgmWindow : Window, IDisposable
             }
         }
 
-        // Create room button
-        if (ImGui.Button("+ Create Room##bgmcreate", new Vector2(-1, 0)))
+        // Create / Join buttons
+        float btnW = (ImGui.GetContentRegionAvail().X - ImGui.GetStyle().ItemSpacing.X) / 2;
+        if (ImGui.Button("+ Create##bgmcreate", new Vector2(btnW, 0)))
         {
             newRoomName = string.Empty;
             pendingCreate = true;
         }
+        ImGui.SameLine();
+        if (ImGui.Button("+ Join##bgmjoin", new Vector2(btnW, 0)))
+        {
+            joinCode = string.Empty;
+            joinName = string.Empty;
+            pendingJoin = true;
+        }
 
         DrawCreateModal(rooms);
+        DrawJoinModal(rooms);
+    }
+
+    private void DrawJoinModal(List<RpRoom> rooms)
+    {
+        var center = ImGui.GetMainViewport().GetCenter();
+        ImGui.SetNextWindowPos(center, ImGuiCond.Appearing, new Vector2(0.5f, 0.5f));
+        float w0 = 300 * ImGuiHelpers.GlobalScale;
+        ImGui.SetNextWindowSizeConstraints(new Vector2(w0, 0), new Vector2(w0, float.MaxValue));
+
+        if (!ImGui.BeginPopupModal("##bgm_join", ref joinOpen,
+            ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoTitleBar))
+            return;
+
+        ImGui.TextUnformatted("Join Room");
+        ImGui.Separator();
+
+        ImGui.TextDisabled("Room Code");
+        ImGui.SetNextItemWidth(220 * ImGuiHelpers.GlobalScale);
+        ImGui.InputText("##bgmjoincode", ref joinCode, 16);
+        joinCode = joinCode.Trim().ToUpperInvariant();
+
+        ImGui.TextDisabled("Local Name (optional)");
+        ImGui.SetNextItemWidth(220 * ImGuiHelpers.GlobalScale);
+        bool enter = ImGui.InputText("##bgmjoinname", ref joinName, 48,
+            ImGuiInputTextFlags.EnterReturnsTrue);
+
+        bool canJoin = joinCode.Length > 0;
+        if (!canJoin) ImGui.BeginDisabled();
+        if ((ImGui.Button("Join##bgmjoinok", new Vector2(96, 0)) || enter) && canJoin)
+        {
+            string name = string.IsNullOrWhiteSpace(joinName) ? $"Room {joinCode}" : joinName.Trim();
+            var room = new RpRoom { Name = name, Code = joinCode };
+            rooms.Add(room);
+            selectedRoom = rooms.Count - 1;
+            plugin.Configuration.Save();
+            playerWindow.OpenRoom(room, bgmService);
+            playerWindow.IsOpen = true;
+            ImGui.CloseCurrentPopup();
+        }
+        if (!canJoin) ImGui.EndDisabled();
+
+        ImGui.SameLine();
+        if (ImGui.Button("Cancel##bgmjoincancel", new Vector2(96, 0)))
+            ImGui.CloseCurrentPopup();
+
+        ImGui.EndPopup();
     }
 
     private void DrawCreateModal(List<RpRoom> rooms)
