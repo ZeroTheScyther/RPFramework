@@ -19,5 +19,8 @@ public class Configuration : IPluginConfiguration
     // Shared bags — persisted so we can re-join on plugin reload
     public List<SharedBagRef> SharedBags { get; set; } = new();
 
+    // Per-character RPG stats, keyed by "Name@World"
+    public Dictionary<string, RpCharacter> Characters { get; set; } = new();
+
     public void Save() => Plugin.PluginInterface.SavePluginConfig(this);
 }

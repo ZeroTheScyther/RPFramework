@@ -1,6 +1,7 @@
 using System.IO;
 using System.Threading.Tasks;
 using Dalamud.Game.Command;
+using Dalamud.Game.Gui;
 using Dalamud.IoC;
 using Dalamud.Plugin;
 using Dalamud.Interface.Windowing;
@@ -20,14 +21,21 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] internal static IObjectTable            ObjectTable     { get; private set; } = null!;
     [PluginService] internal static IFramework              Framework       { get; private set; } = null!;
     [PluginService] internal static IPluginLog              Log             { get; private set; } = null!;
+    [PluginService] internal static IChatGui               ChatGui         { get; private set; } = null!;
 
     private const string CmdInventory      = "/rpinventory";
     private const string CmdInventoryShort = "/rpinv";
     private const string CmdBgm            = "/rpbgm";
-    private const string DefaultServerUrl  = "https://rpframework.example.com";
+    private const string CmdSettings       = "/rpsettings";
+    private const string CmdSheet         = "/rpsheet";
+    private const string CmdSheetShort    = "/rpcs";
+    private const string CmdDice          = "/rpdice";
+    private const string DefaultServerUrl = "https://rpframework.example.com";
 
     public Configuration   Configuration { get; init; }
     public readonly WindowSystem WindowSystem = new("RPFramework");
+
+    private bool _autoConnectPending;
 
     private InventoryWindow         InventoryWindow         { get; init; }
     private BgmWindow               BgmWindow               { get; init; }
@@ -35,6 +43,8 @@ public sealed class Plugin : IDalamudPlugin
     private TradeNotificationWindow TradeNotificationWindow { get; init; }
     private BagShareInviteWindow    BagShareInviteWindow    { get; init; }
     private SettingsWindow          SettingsWindow          { get; init; }
+    private CharacterSheetWindow    CharacterSheetWindow    { get; init; }
+    private DiceRollerWindow        DiceRollerWindow        { get; init; }
     public  BgmService              BgmService              { get; init; }
     public  NetworkService          Network                 { get; init; }
 
@@ -54,6 +64,8 @@ public sealed class Plugin : IDalamudPlugin
         InventoryWindow         = new InventoryWindow(this);
         BgmPlayerWindow         = new BgmPlayerWindow(this);
         BgmWindow               = new BgmWindow(this, BgmService, BgmPlayerWindow);
+        CharacterSheetWindow    = new CharacterSheetWindow(this);
+        DiceRollerWindow        = new DiceRollerWindow(this);
 
         WindowSystem.AddWindow(InventoryWindow);
         WindowSystem.AddWindow(BgmWindow);
@@ -61,6 +73,8 @@ public sealed class Plugin : IDalamudPlugin
         WindowSystem.AddWindow(TradeNotificationWindow);
         WindowSystem.AddWindow(BagShareInviteWindow);
         WindowSystem.AddWindow(SettingsWindow);
+        WindowSystem.AddWindow(CharacterSheetWindow);
+        WindowSystem.AddWindow(DiceRollerWindow);
 
         // Wire up network events
         Network.TradeOfferReceived  += OnTradeOfferReceived;
@@ -71,9 +85,13 @@ public sealed class Plugin : IDalamudPlugin
         Network.BagDissolved        += OnBagDissolved;
         Network.BagStateReceived    += OnBagStateReceived;
 
-        CommandManager.AddHandler(CmdInventory,      new CommandInfo(OnInventoryCmd) { HelpMessage = "Opens the RP Inventory" });
-        CommandManager.AddHandler(CmdInventoryShort, new CommandInfo(OnInventoryCmd) { HelpMessage = "Opens the RP Inventory" });
-        CommandManager.AddHandler(CmdBgm,            new CommandInfo(OnBgmCmd)       { HelpMessage = "Opens the RP BGM music player" });
+        CommandManager.AddHandler(CmdInventory,      new CommandInfo(OnInventoryCmd)  { HelpMessage = "Opens the RP Inventory" });
+        CommandManager.AddHandler(CmdInventoryShort, new CommandInfo(OnInventoryCmd)  { HelpMessage = "Opens the RP Inventory" });
+        CommandManager.AddHandler(CmdBgm,            new CommandInfo(OnBgmCmd)        { HelpMessage = "Opens the RP BGM music player" });
+        CommandManager.AddHandler(CmdSettings,       new CommandInfo(OnSettingsCmd)   { HelpMessage = "Opens RPFramework Settings" });
+        CommandManager.AddHandler(CmdSheet,          new CommandInfo(OnSheetCmd)      { HelpMessage = "Opens the RP Character Sheet" });
+        CommandManager.AddHandler(CmdSheetShort,     new CommandInfo(OnSheetCmd)      { HelpMessage = "Opens the RP Character Sheet" });
+        CommandManager.AddHandler(CmdDice,           new CommandInfo(OnDiceCmd)       { HelpMessage = "Opens dice roller, or rolls immediately: /rpdice [d4/d6/.../d20/dN]" });
 
         PluginInterface.UiBuilder.Draw         += WindowSystem.Draw;
         PluginInterface.UiBuilder.OpenMainUi   += InventoryWindow.Toggle;
@@ -81,12 +99,8 @@ public sealed class Plugin : IDalamudPlugin
         Framework.Update                       += OnFrameworkUpdate;
         ClientState.Login                      += OnLogin;
 
-        // Auto-connect if the server URL has been configured (i.e. not the default placeholder)
-        if (Configuration.ServerUrl != DefaultServerUrl && LocalPlayerId != null)
-        {
-            string url = Configuration.ServerUrl, id = LocalPlayerId, name = LocalDisplayName;
-            Task.Run(() => Network.ConnectAsync(url, id, name));
-        }
+        // Auto-connect deferred to first framework tick (LocalPlayerId not safe to call in ctor)
+        _autoConnectPending = Configuration.ServerUrl != DefaultServerUrl;
     }
 
     public void Dispose()
@@ -112,18 +126,41 @@ public sealed class Plugin : IDalamudPlugin
         TradeNotificationWindow.Dispose();
         BagShareInviteWindow.Dispose();
         SettingsWindow.Dispose();
+        CharacterSheetWindow.Dispose();
+        DiceRollerWindow.Dispose();
         BgmService.Dispose();
         Network.Dispose();
 
         CommandManager.RemoveHandler(CmdInventory);
         CommandManager.RemoveHandler(CmdInventoryShort);
         CommandManager.RemoveHandler(CmdBgm);
+        CommandManager.RemoveHandler(CmdSettings);
+        CommandManager.RemoveHandler(CmdSheet);
+        CommandManager.RemoveHandler(CmdSheetShort);
+        CommandManager.RemoveHandler(CmdDice);
     }
 
-    private void OnFrameworkUpdate(IFramework framework) => BgmService.Update();
+    private void OnFrameworkUpdate(IFramework framework)
+    {
+        BgmService.Update();
+
+        if (_autoConnectPending && !Network.IsConnected)
+        {
+            string? id = LocalPlayerId;
+            if (id != null)
+            {
+                _autoConnectPending = false;
+                string url = Configuration.ServerUrl, name = LocalDisplayName;
+                Task.Run(() => Network.ConnectAsync(url, id, name));
+            }
+        }
+    }
 
     private void OnLogin()
     {
+        if (LocalPlayerId is { } pid)
+            GetOrCreateCharacter(pid);
+
         if (Configuration.ServerUrl == DefaultServerUrl || Network.IsConnected) return;
         string? id = LocalPlayerId;
         if (id == null) return;
@@ -131,8 +168,17 @@ public sealed class Plugin : IDalamudPlugin
         Task.Run(() => Network.ConnectAsync(url, id, name));
     }
 
-    private void OnInventoryCmd(string command, string args) => InventoryWindow.Toggle();
-    private void OnBgmCmd(string command, string args)       => BgmWindow.Toggle();
+    private void OnInventoryCmd(string command, string args)  => InventoryWindow.Toggle();
+    private void OnBgmCmd(string command, string args)        => BgmWindow.Toggle();
+    private void OnSettingsCmd(string command, string args)   => SettingsWindow.Toggle();
+    private void OnSheetCmd(string command, string args)      => CharacterSheetWindow.Toggle();
+    private void OnDiceCmd(string command, string args)
+    {
+        if (string.IsNullOrWhiteSpace(args))
+            DiceRollerWindow.Toggle();
+        else
+            DiceRollerWindow.RollFromCommand(args);
+    }
 
     // ── Network event handlers (all called on framework thread) ──────────────
 
@@ -239,4 +285,15 @@ public sealed class Plugin : IDalamudPlugin
     }
 
     public string LocalDisplayName => ObjectTable.LocalPlayer?.Name.ToString() ?? "Unknown";
+
+    public Models.RpCharacter GetOrCreateCharacter(string playerId)
+    {
+        if (!Configuration.Characters.TryGetValue(playerId, out var ch))
+        {
+            ch = new Models.RpCharacter();
+            Configuration.Characters[playerId] = ch;
+            Configuration.Save();
+        }
+        return ch;
+    }
 }

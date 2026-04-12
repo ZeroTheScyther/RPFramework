@@ -327,10 +327,10 @@ public class BgmPlayerWindow : Window, IDisposable
             ImGui.TextColored(new Vector4(1f, 0.35f, 0.35f, 1f), err);
 
         // Volume slider (always client-side)
-        float vol = room.Volume;
+        float vol = room.Volume * 100f;
         ImGui.SetNextItemWidth(-1);
-        if (ImGui.SliderFloat("##bgmvol", ref vol, 0f, 1f))
-            bgmService.SetVolume(vol);
+        if (ImGui.SliderFloat("##bgmvol", ref vol, 0f, 100f, "%.0f%%"))
+            bgmService.SetVolume(vol / 100f);
         if (ImGui.IsItemHovered()) ImGui.SetTooltip("Volume (local only)");
     }
 
