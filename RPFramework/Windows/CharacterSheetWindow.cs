@@ -60,10 +60,17 @@ public class CharacterSheetWindow : Window, IDisposable
 
         // ── HP / AP bars ──────────────────────────────────────────────────────
         DrawPool("HP", ref hpCur, ref hpMax,
-                 new Vector4(0.20f, 0.70f, 0.20f, 1f), scale, ref dirty);
+                 new Vector4(0.20f, 0.70f, 0.20f, 1f), scale, ref dirty,
+                 bonus: SkillHelpers.StatMod(ch.Con));
         ImGui.Spacing();
         DrawPool("AP", ref apCur, ref apMax,
                  new Vector4(0.20f, 0.50f, 0.90f, 1f), scale, ref dirty);
+
+        // AP exhaustion indicator
+        int apPen = SkillHelpers.ApPenalty(ch);
+        if (apPen < 0)
+            ImGui.TextColored(new Vector4(1f, 0.4f, 0.2f, 1f),
+                              $"Exhausted: {apPen} to all stat rolls");
 
         ImGui.Spacing();
         ImGui.Separator();
@@ -71,13 +78,15 @@ public class CharacterSheetWindow : Window, IDisposable
         // ── Stat grid ─────────────────────────────────────────────────────────
         ImGui.TextUnformatted("Stats");
 
-        if (ImGui.BeginTable("##rpstattbl", 4, ImGuiTableFlags.None))
+        if (ImGui.BeginTable("##rpstattbl", 6, ImGuiTableFlags.None))
         {
-            // 4 columns: label, input, label, input
+            // 6 columns: label, input, mod, label, input, mod
             ImGui.TableSetupColumn("##sl1", ImGuiTableColumnFlags.WidthFixed, 36 * scale);
-            ImGui.TableSetupColumn("##sv1", ImGuiTableColumnFlags.WidthFixed, 60 * scale);
+            ImGui.TableSetupColumn("##sv1", ImGuiTableColumnFlags.WidthFixed, 52 * scale);
+            ImGui.TableSetupColumn("##sm1", ImGuiTableColumnFlags.WidthFixed, 34 * scale);
             ImGui.TableSetupColumn("##sl2", ImGuiTableColumnFlags.WidthFixed, 36 * scale);
-            ImGui.TableSetupColumn("##sv2", ImGuiTableColumnFlags.WidthFixed, 60 * scale);
+            ImGui.TableSetupColumn("##sv2", ImGuiTableColumnFlags.WidthFixed, 52 * scale);
+            ImGui.TableSetupColumn("##sm2", ImGuiTableColumnFlags.WidthFixed, 34 * scale);
 
             DrawStatRow("STR", ref str, "DEX", ref dex, scale, ref dirty);
             DrawStatRow("SPD", ref spd, "CON", ref con, scale, ref dirty);
@@ -116,14 +125,21 @@ public class CharacterSheetWindow : Window, IDisposable
         }
 
         save:
-        if (dirty) plugin.Configuration.Save();
+        if (dirty)
+        {
+            plugin.Configuration.Save();
+            plugin.PushLocalProfile();
+        }
     }
 
     private static void DrawPool(
         string label, ref int current, ref int max,
-        Vector4 color, float scale, ref bool dirty)
+        Vector4 color, float scale, ref bool dirty, int bonus = 0)
     {
-        float fraction = max > 0 ? Math.Clamp((float)current / max, 0f, 1f) : 0f;
+        int effectiveMax = max + bonus;
+        float fraction   = effectiveMax > 0
+            ? Math.Clamp((float)current / effectiveMax, 0f, 1f)
+            : 0f;
 
         ImGui.TextUnformatted(label);
         ImGui.SameLine();
@@ -135,7 +151,7 @@ public class CharacterSheetWindow : Window, IDisposable
         ImGui.SetNextItemWidth(fieldW);
         if (ImGui.InputInt($"##rp{label}cur", ref current, 0, 0))
         {
-            current = Math.Clamp(current, 0, max);
+            current = Math.Clamp(current, 0, effectiveMax);
             dirty = true;
         }
         ImGui.SameLine();
@@ -145,8 +161,13 @@ public class CharacterSheetWindow : Window, IDisposable
         if (ImGui.InputInt($"##rp{label}max", ref max, 0, 0))
         {
             max     = Math.Clamp(max,     0,       9999);
-            current = Math.Clamp(current, 0,       max);
+            current = Math.Clamp(current, 0,       max + bonus);
             dirty = true;
+        }
+        if (bonus != 0)
+        {
+            ImGui.SameLine();
+            ImGui.TextDisabled(bonus > 0 ? $"(+{bonus} CON)" : $"({bonus} CON)");
         }
     }
 
@@ -161,22 +182,30 @@ public class CharacterSheetWindow : Window, IDisposable
         ImGui.TextUnformatted(lbl1);
 
         ImGui.TableSetColumnIndex(1);
-        ImGui.SetNextItemWidth(56 * scale);
+        ImGui.SetNextItemWidth(48 * scale);
         if (ImGui.InputInt($"##rp{lbl1}", ref v1, 0, 0))
         {
-            v1    = Math.Clamp(v1, -99, 99);
+            v1    = Math.Clamp(v1, 8, 20);
             dirty = true;
         }
 
         ImGui.TableSetColumnIndex(2);
-        ImGui.TextUnformatted(lbl2);
+        int m1 = SkillHelpers.StatMod(v1);
+        ImGui.TextDisabled(m1 >= 0 ? $"+{m1}" : $"{m1}");
 
         ImGui.TableSetColumnIndex(3);
-        ImGui.SetNextItemWidth(56 * scale);
+        ImGui.TextUnformatted(lbl2);
+
+        ImGui.TableSetColumnIndex(4);
+        ImGui.SetNextItemWidth(48 * scale);
         if (ImGui.InputInt($"##rp{lbl2}", ref v2, 0, 0))
         {
-            v2    = Math.Clamp(v2, -99, 99);
+            v2    = Math.Clamp(v2, 8, 20);
             dirty = true;
         }
+
+        ImGui.TableSetColumnIndex(5);
+        int m2 = SkillHelpers.StatMod(v2);
+        ImGui.TextDisabled(m2 >= 0 ? $"+{m2}" : $"{m2}");
     }
 }

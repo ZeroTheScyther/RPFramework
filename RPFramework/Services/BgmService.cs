@@ -49,6 +49,7 @@ public class BgmService : IDisposable
 
     private volatile bool  isLoading;
     private volatile bool  pendingAdvance;
+    private volatile bool  pendingStopBroadcast;
     private          bool  isMuted;
     private          string? loadError;
     private          float  downloadProgress;  // 0–1
@@ -58,14 +59,16 @@ public class BgmService : IDisposable
 
     // ── Public state ──────────────────────────────────────────────────────────
 
-    public bool    IsPlaying        => outputDevice?.PlaybackState == PlaybackState.Playing;
-    public bool    IsPaused         => outputDevice?.PlaybackState == PlaybackState.Paused;
-    public bool    IsLoading        => isLoading;
-    public bool    IsMuted          => isMuted;
-    public string? LoadError        => loadError;
-    public int     CurrentSongIndex => currentSongIndex;
-    public RpRoom? CurrentRoom      => currentRoom;
-    public float   DownloadProgress => downloadProgress;
+    public bool    IsPlaying             => outputDevice?.PlaybackState == PlaybackState.Playing;
+    public bool    IsPaused              => outputDevice?.PlaybackState == PlaybackState.Paused;
+    public bool    IsLoading             => isLoading;
+    public bool    IsMuted               => isMuted;
+    public string? LoadError             => loadError;
+    public int     CurrentSongIndex      => currentSongIndex;
+    public RpRoom? CurrentRoom           => currentRoom;
+    public float   DownloadProgress      => downloadProgress;
+    /// <summary>Set when the last song in the playlist ends with no loop. Cleared by the caller after broadcasting.</summary>
+    public bool    PendingStopBroadcast  { get => pendingStopBroadcast; set => pendingStopBroadcast = value; }
 
     public BgmService(string cacheDir)
     {
@@ -143,6 +146,12 @@ public class BgmService : IDisposable
     public double CurrentPositionSeconds
     {
         get { lock (playLock) { return audioStream?.CurrentTime.TotalSeconds ?? 0.0; } }
+    }
+
+    /// <summary>Total duration of the currently loaded track in seconds. 0 if nothing is loaded.</summary>
+    public double TotalDurationSeconds
+    {
+        get { lock (playLock) { return audioStream?.TotalTime.TotalSeconds ?? 0.0; } }
     }
 
     /// <summary>
@@ -252,6 +261,7 @@ public class BgmService : IDisposable
                 {
                     currentSongIndex = -1;
                     if (currentRoom != null) currentRoom.CurrentIndex = -1;
+                    pendingStopBroadcast = true;
                 }
                 break;
         }

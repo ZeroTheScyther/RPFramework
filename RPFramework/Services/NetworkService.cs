@@ -57,6 +57,10 @@ public class NetworkService : IDisposable
     public event Action<Guid, string, string>?         BagParticipantJoined;   // bagId, playerId, displayName
     public event Action<Guid, string>?                 BagParticipantDeclined; // bagId, playerId
 
+    // ── Character profiles ────────────────────────────────────────────────────
+    public event Action<CharacterProfileDto>? ProfileReceived;
+    public event Action<string>?              ProfileFetchFailed; // playerId
+
     // ── Generic error ─────────────────────────────────────────────────────────
     public event Action<string, string>? ErrorReceived; // feature, message
 
@@ -186,6 +190,12 @@ public class NetworkService : IDisposable
         _conn.On<Guid, string>("OnBagParticipantDeclined",
             (id, pid) => Fire(() => BagParticipantDeclined?.Invoke(id, pid)));
 
+        // Character profiles
+        _conn.On<CharacterProfileDto>("OnProfileReceived",
+            p   => Fire(() => ProfileReceived?.Invoke(p)));
+        _conn.On<string>("OnProfileNotFound",
+            pid => Fire(() => ProfileFetchFailed?.Invoke(pid)));
+
         // Errors
         _conn.On<string, string>("OnError",
             (feat, msg) => Fire(() => ErrorReceived?.Invoke(feat, msg)));
@@ -227,6 +237,16 @@ public class NetworkService : IDisposable
 
     public Task BgmSendAddSong(string code, RpSongDto song)
         => SafeInvoke("BgmAddSong", code, song);
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // Character Profiles
+    // ═════════════════════════════════════════════════════════════════════════
+
+    public Task PushProfileAsync(CharacterProfileDto profile)
+        => SafeInvoke("PushProfile", profile);
+
+    public Task FetchProfileAsync(string playerId)
+        => SafeInvoke("FetchProfile", playerId);
 
     public Task BgmSendRemoveSong(string code, Guid songId)
         => SafeInvoke("BgmRemoveSong", code, songId);

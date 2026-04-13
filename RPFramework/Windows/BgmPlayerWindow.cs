@@ -24,6 +24,10 @@ public class BgmPlayerWindow : Window, IDisposable
     private string addSongUrl   = string.Empty;
     private bool   addSongLoading;
 
+    // Seek slider drag state
+    private bool  _seekDragging;
+    private float _seekDragValue;
+
     // Network: live member list maintained by NetworkService events
     private readonly List<RoomMemberDto> members = new();
 
@@ -122,8 +126,15 @@ public class BgmPlayerWindow : Window, IDisposable
             });
         }
 
-        // Sync playback: if not authority, apply the owner's state
-        if (!isAuthority && bgmService != null)
+        // Sync playback: only if the local player is confirmed in the state's member list as a
+        // non-authority member. Skipping when the local player is absent from state.Members
+        // avoids auto-starting music during the brief window before the server echoes our join.
+        string? localIdForSync = plugin.LocalPlayerId;
+        var selfInState = localIdForSync != null
+            ? state.Members.Find(m => m.PlayerId == localIdForSync)
+            : null;
+        bool localIsAuthority = selfInState?.Role is RoomRole.Owner or RoomRole.Admin;
+        if (selfInState != null && !localIsAuthority && bgmService != null)
             ApplyPlaybackState(state.CurrentIndex, state.IsPlaying, state.PositionSeconds, state.ServerTimestamp);
     }
 
@@ -282,6 +293,13 @@ public class BgmPlayerWindow : Window, IDisposable
             pendingAddSong = false;
         }
 
+        // End-of-playlist broadcast: authority needs to tell members to stop
+        if (isAuthority && bgmService.PendingStopBroadcast)
+        {
+            bgmService.PendingStopBroadcast = false;
+            SyncStop();
+        }
+
         // Code row
         ImGui.TextDisabled("Code:");
         ImGui.SameLine();
@@ -305,6 +323,7 @@ public class BgmPlayerWindow : Window, IDisposable
                 {
                     string code = room.Code;
                     Task.Run(() => plugin.Network.BgmLeaveAsync(code));
+                    bgmService?.Stop();
                     members.Clear();
                     RefreshAuthority();
                 }
@@ -383,6 +402,11 @@ public class BgmPlayerWindow : Window, IDisposable
         if (ImGui.IsItemHovered()) ImGui.SetTooltip(loading ? "Downloading..." : playing ? "Pause" : "Play");
         ImGui.SameLine();
 
+        // Stop
+        if (ImGui.Button("■##bgmstop")) { bgmService.Stop(); SyncStop(); }
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Stop");
+        ImGui.SameLine();
+
         // Next
         if (ImGui.Button(">|##bgmnext")) { bgmService.Next(); SyncPlay(); }
         if (ImGui.IsItemHovered()) ImGui.SetTooltip("Next");
@@ -429,6 +453,34 @@ public class BgmPlayerWindow : Window, IDisposable
             bgmService.SetVolume(room.Volume);
         }
         if (ImGui.IsItemHovered()) ImGui.SetTooltip("Volume (local only)");
+
+        // Seek slider — visible when a song is loaded; interactive for authority only
+        double totalSecs = bgmService.TotalDurationSeconds;
+        if (totalSecs > 0)
+        {
+            if (!isAuthority) ImGui.BeginDisabled();
+
+            float seekPos = _seekDragging ? _seekDragValue : (float)bgmService.CurrentPositionSeconds;
+            float seekTot = (float)totalSecs;
+            string timeLabel = $"{TimeSpan.FromSeconds(seekPos):mm\\:ss} / {TimeSpan.FromSeconds(seekTot):mm\\:ss}";
+            ImGui.SetNextItemWidth(-1);
+            if (ImGui.SliderFloat("##bgmseek", ref seekPos, 0f, seekTot, timeLabel))
+            {
+                _seekDragging  = true;
+                _seekDragValue = seekPos;
+                bgmService.SeekTo(seekPos);
+            }
+            if (ImGui.IsItemDeactivatedAfterEdit())
+            {
+                _seekDragging = false;
+                SyncSeek(_seekDragValue);
+            }
+            if (!ImGui.IsItemActive())
+                _seekDragging = false;
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip("Seek");
+
+            if (!isAuthority) ImGui.EndDisabled();
+        }
     }
 
     // ── Sync helpers: only fires if connected and authority ───────────────────
@@ -448,6 +500,18 @@ public class BgmPlayerWindow : Window, IDisposable
             Task.Run(() => plugin.Network.BgmSyncPause(room.Code, pos));
         else
             Task.Run(() => plugin.Network.BgmSyncResume(room.Code, pos));
+    }
+
+    private void SyncStop()
+    {
+        if (!isAuthority || !plugin.Network.IsConnected || room == null) return;
+        Task.Run(() => plugin.Network.BgmSyncStop(room.Code));
+    }
+
+    private void SyncSeek(double positionSeconds)
+    {
+        if (!isAuthority || !plugin.Network.IsConnected || room == null) return;
+        Task.Run(() => plugin.Network.BgmSyncSeek(room.Code, positionSeconds));
     }
 
     private void SyncLoop()

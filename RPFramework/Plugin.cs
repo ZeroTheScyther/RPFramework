@@ -1,13 +1,17 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
 using Dalamud.Game.Command;
 using Dalamud.Game.Gui;
+using Dalamud.Game.Gui.ContextMenu;
 using Dalamud.IoC;
 using Dalamud.Plugin;
 using Dalamud.Interface.Windowing;
 using Dalamud.Plugin.Services;
+using RPFramework.Models;
+using RPFramework.Models.Net;
 using RPFramework.Services;
 using RPFramework.Windows;
 
@@ -23,7 +27,8 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] internal static IObjectTable            ObjectTable     { get; private set; } = null!;
     [PluginService] internal static IFramework              Framework       { get; private set; } = null!;
     [PluginService] internal static IPluginLog              Log             { get; private set; } = null!;
-    [PluginService] internal static IChatGui               ChatGui         { get; private set; } = null!;
+    [PluginService] internal static IChatGui                ChatGui         { get; private set; } = null!;
+    [PluginService] internal static IContextMenu            ContextMenu     { get; private set; } = null!;
 
     private const string CmdInventory      = "/rpinventory";
     private const string CmdInventoryShort = "/rpinv";
@@ -31,7 +36,10 @@ public sealed class Plugin : IDalamudPlugin
     private const string CmdSettings       = "/rpsettings";
     private const string CmdSheet         = "/rpsheet";
     private const string CmdSheetShort    = "/rpcs";
+    private const string CmdStats         = "/rpstats";
     private const string CmdDice          = "/rpdice";
+    private const string CmdSkills        = "/rpskills";
+    private const string CmdSkillsShort   = "/rpsk";
     private const string DefaultServerUrl = "https://rpframework.example.com";
 
     public Configuration   Configuration { get; init; }
@@ -45,6 +53,13 @@ public sealed class Plugin : IDalamudPlugin
 
     private bool _autoConnectPending;
 
+    // Dynamic player profile windows (one per remote player ID)
+    private readonly Dictionary<string, PlayerSheetWindow>  _playerSheetWindows  = new();
+    private readonly Dictionary<string, PlayerSkillsWindow> _playerSkillsWindows = new();
+    private readonly HashSet<string> _pendingSheetFetches  = new();
+    private readonly HashSet<string> _pendingSkillsFetches = new();
+    private DateTime _lastProfilePush = DateTime.MinValue;
+
     private InventoryWindow         InventoryWindow         { get; init; }
     private BgmWindow               BgmWindow               { get; init; }
     private BgmPlayerWindow         BgmPlayerWindow         { get; init; }
@@ -53,6 +68,7 @@ public sealed class Plugin : IDalamudPlugin
     private SettingsWindow          SettingsWindow          { get; init; }
     private CharacterSheetWindow    CharacterSheetWindow    { get; init; }
     private DiceRollerWindow        DiceRollerWindow        { get; init; }
+    private SkillsWindow            SkillsWindow            { get; init; }
     public  BgmService              BgmService              { get; init; }
     public  NetworkService          Network                 { get; init; }
 
@@ -74,6 +90,7 @@ public sealed class Plugin : IDalamudPlugin
         BgmWindow               = new BgmWindow(this, BgmService, BgmPlayerWindow);
         CharacterSheetWindow    = new CharacterSheetWindow(this);
         DiceRollerWindow        = new DiceRollerWindow(this);
+        SkillsWindow            = new SkillsWindow(this);
 
         WindowSystem.AddWindow(InventoryWindow);
         WindowSystem.AddWindow(BgmWindow);
@@ -83,6 +100,7 @@ public sealed class Plugin : IDalamudPlugin
         WindowSystem.AddWindow(SettingsWindow);
         WindowSystem.AddWindow(CharacterSheetWindow);
         WindowSystem.AddWindow(DiceRollerWindow);
+        WindowSystem.AddWindow(SkillsWindow);
 
         // Wire up network events
         Network.TradeOfferReceived  += OnTradeOfferReceived;
@@ -94,6 +112,10 @@ public sealed class Plugin : IDalamudPlugin
         Network.BagStateReceived       += OnBagStateReceived;
         Network.BagParticipantJoined   += OnBagParticipantJoined;
         Network.BagParticipantLeft     += OnBagParticipantLeft;
+        Network.ProfileReceived        += OnProfileReceived;
+        Network.ProfileFetchFailed     += OnProfileFetchFailed;
+
+        ContextMenu.OnMenuOpened += OnContextMenuOpened;
 
         CommandManager.AddHandler(CmdInventory,      new CommandInfo(OnInventoryCmd)  { HelpMessage = "Opens the RP Inventory" });
         CommandManager.AddHandler(CmdInventoryShort, new CommandInfo(OnInventoryCmd)  { HelpMessage = "Opens the RP Inventory" });
@@ -101,7 +123,10 @@ public sealed class Plugin : IDalamudPlugin
         CommandManager.AddHandler(CmdSettings,       new CommandInfo(OnSettingsCmd)   { HelpMessage = "Opens RPFramework Settings" });
         CommandManager.AddHandler(CmdSheet,          new CommandInfo(OnSheetCmd)      { HelpMessage = "Opens the RP Character Sheet" });
         CommandManager.AddHandler(CmdSheetShort,     new CommandInfo(OnSheetCmd)      { HelpMessage = "Opens the RP Character Sheet" });
+        CommandManager.AddHandler(CmdStats,          new CommandInfo(OnSheetCmd)      { HelpMessage = "Opens the RP Character Sheet" });
         CommandManager.AddHandler(CmdDice,           new CommandInfo(OnDiceCmd)       { HelpMessage = "Opens dice roller, or rolls immediately: /rpdice [d4/d6/.../d20/dN]" });
+        CommandManager.AddHandler(CmdSkills,         new CommandInfo(OnSkillsCmd)     { HelpMessage = "Opens the RP Skills & Passives window" });
+        CommandManager.AddHandler(CmdSkillsShort,    new CommandInfo(OnSkillsCmd)     { HelpMessage = "Opens the RP Skills & Passives window" });
 
         PluginInterface.UiBuilder.Draw         += WindowSystem.Draw;
         PluginInterface.UiBuilder.OpenMainUi   += InventoryWindow.Toggle;
@@ -124,6 +149,13 @@ public sealed class Plugin : IDalamudPlugin
         Network.BagStateReceived       -= OnBagStateReceived;
         Network.BagParticipantJoined   -= OnBagParticipantJoined;
         Network.BagParticipantLeft     -= OnBagParticipantLeft;
+        Network.ProfileReceived        -= OnProfileReceived;
+        Network.ProfileFetchFailed     -= OnProfileFetchFailed;
+
+        ContextMenu.OnMenuOpened -= OnContextMenuOpened;
+
+        foreach (var w in _playerSheetWindows.Values)  w.Dispose();
+        foreach (var w in _playerSkillsWindows.Values) w.Dispose();
 
         Framework.Update                       -= OnFrameworkUpdate;
         ClientState.Login                      -= OnLogin;
@@ -140,6 +172,7 @@ public sealed class Plugin : IDalamudPlugin
         SettingsWindow.Dispose();
         CharacterSheetWindow.Dispose();
         DiceRollerWindow.Dispose();
+        SkillsWindow.Dispose();
         BgmService.Dispose();
         Network.Dispose();
 
@@ -149,7 +182,10 @@ public sealed class Plugin : IDalamudPlugin
         CommandManager.RemoveHandler(CmdSettings);
         CommandManager.RemoveHandler(CmdSheet);
         CommandManager.RemoveHandler(CmdSheetShort);
+        CommandManager.RemoveHandler(CmdStats);
         CommandManager.RemoveHandler(CmdDice);
+        CommandManager.RemoveHandler(CmdSkills);
+        CommandManager.RemoveHandler(CmdSkillsShort);
     }
 
     private void OnFrameworkUpdate(IFramework framework)
@@ -180,10 +216,27 @@ public sealed class Plugin : IDalamudPlugin
         Task.Run(() => Network.ConnectAsync(url, id, name));
     }
 
-    private void OnInventoryCmd(string command, string args)  => InventoryWindow.Toggle();
-    private void OnBgmCmd(string command, string args)        => BgmWindow.Toggle();
-    private void OnSettingsCmd(string command, string args)   => SettingsWindow.Toggle();
-    private void OnSheetCmd(string command, string args)      => CharacterSheetWindow.Toggle();
+    private void OnInventoryCmd(string command, string args) => InventoryWindow.Toggle();
+    private void OnBgmCmd(string command, string args)       => BgmWindow.Toggle();
+    private void OnSettingsCmd(string command, string args)  => SettingsWindow.Toggle();
+
+    private void OnSheetCmd(string command, string args)
+    {
+        string target = args.Trim().Trim('"');
+        if (string.IsNullOrWhiteSpace(target))
+            CharacterSheetWindow.Toggle();
+        else
+            OpenPlayerSheet(target, ParseDisplayName(target));
+    }
+
+    private void OnSkillsCmd(string command, string args)
+    {
+        string target = args.Trim().Trim('"');
+        if (string.IsNullOrWhiteSpace(target))
+            SkillsWindow.Toggle();
+        else
+            OpenPlayerSkills(target, ParseDisplayName(target));
+    }
     private void OnDiceCmd(string command, string args)
     {
         if (string.IsNullOrWhiteSpace(args))
@@ -351,6 +404,145 @@ public sealed class Plugin : IDalamudPlugin
     }
 
     public string LocalDisplayName => ObjectTable.LocalPlayer?.Name.ToString() ?? "Unknown";
+
+    private static string ParseDisplayName(string playerId)
+        => playerId.Contains('@') ? playerId[..playerId.IndexOf('@')] : playerId;
+
+    // ── Profile sync ──────────────────────────────────────────────────────────
+
+    public CharacterProfileDto BuildProfileDto(string pid, string displayName, Models.RpCharacter ch)
+    {
+        var skills = ch.Skills.Select(s => new RpSkillDto(
+            s.Id, s.Name, s.Description, s.Type, s.Cooldown, s.Duration,
+            s.Conditions, s.Effects)).ToList();
+        return new CharacterProfileDto(
+            pid, displayName,
+            ch.HpCurrent, ch.HpMax, ch.ApCurrent, ch.ApMax,
+            ch.Str, ch.Dex, ch.Spd, ch.Con,
+            ch.Mem, ch.Mtl, ch.Int, ch.Cha,
+            ch.Proficiencies, skills);
+    }
+
+    /// <summary>
+    /// Pushes the local player's character profile to the relay server.
+    /// Throttled to at most once every 3 seconds to avoid flooding on continuous edits.
+    /// </summary>
+    public void PushLocalProfile()
+    {
+        if (!Network.IsConnected) return;
+        if ((DateTime.UtcNow - _lastProfilePush).TotalSeconds < 3) return;
+        string? pid = LocalPlayerId;
+        if (pid == null) return;
+        _lastProfilePush = DateTime.UtcNow;
+        var dto = BuildProfileDto(pid, LocalDisplayName, GetOrCreateCharacter(pid));
+        Task.Run(() => Network.PushProfileAsync(dto));
+    }
+
+    // ── Player profile windows ────────────────────────────────────────────────
+
+    public void OpenPlayerSheet(string playerId, string displayName)
+    {
+        if (_playerSheetWindows.TryGetValue(playerId, out var existing))
+        {
+            existing.IsOpen = true;
+            return;
+        }
+        _pendingSheetFetches.Add(playerId);
+        Task.Run(() => Network.FetchProfileAsync(playerId));
+    }
+
+    public void OpenPlayerSkills(string playerId, string displayName)
+    {
+        if (_playerSkillsWindows.TryGetValue(playerId, out var existing))
+        {
+            existing.IsOpen = true;
+            return;
+        }
+        _pendingSkillsFetches.Add(playerId);
+        Task.Run(() => Network.FetchProfileAsync(playerId));
+    }
+
+    private void OnProfileReceived(CharacterProfileDto profile)
+    {
+        string pid        = profile.PlayerId;
+        bool openSheet    = _pendingSheetFetches.Remove(pid);
+        bool openSkills   = _pendingSkillsFetches.Remove(pid);
+
+        if (_playerSheetWindows.TryGetValue(pid, out var existingSheet))
+        {
+            existingSheet.UpdateProfile(profile);
+            if (openSheet) existingSheet.IsOpen = true;
+        }
+        else if (openSheet)
+        {
+            var win = new PlayerSheetWindow(profile, ClosePlayerSheetWindow);
+            _playerSheetWindows[pid] = win;
+            WindowSystem.AddWindow(win);
+            win.IsOpen = true;
+        }
+
+        if (_playerSkillsWindows.TryGetValue(pid, out var existingSkills))
+        {
+            existingSkills.UpdateProfile(profile);
+            if (openSkills) existingSkills.IsOpen = true;
+        }
+        else if (openSkills)
+        {
+            var win = new PlayerSkillsWindow(profile, ClosePlayerSkillsWindow);
+            _playerSkillsWindows[pid] = win;
+            WindowSystem.AddWindow(win);
+            win.IsOpen = true;
+        }
+    }
+
+    private void OnProfileFetchFailed(string playerId)
+    {
+        _pendingSheetFetches.Remove(playerId);
+        _pendingSkillsFetches.Remove(playerId);
+        ChatGui.Print($"[RPFramework] No profile found for {playerId}.");
+    }
+
+    private void ClosePlayerSheetWindow(string playerId)
+    {
+        if (_playerSheetWindows.Remove(playerId, out var win))
+            WindowSystem.RemoveWindow(win);
+    }
+
+    private void ClosePlayerSkillsWindow(string playerId)
+    {
+        if (_playerSkillsWindows.Remove(playerId, out var win))
+            WindowSystem.RemoveWindow(win);
+    }
+
+    // ── Context menu ──────────────────────────────────────────────────────────
+
+    private void OnContextMenuOpened(IMenuOpenedArgs args)
+    {
+        if (args.Target is not MenuTargetDefault target) return;
+        if (target.TargetObject is not Dalamud.Game.ClientState.Objects.SubKinds.IPlayerCharacter pc) return;
+        if (!Network.IsConnected) return;
+
+        string? worldName = null;
+        if (DataManager.GetExcelSheet<Lumina.Excel.Sheets.World>()
+                       .TryGetRow(pc.HomeWorld.RowId, out var worldRow))
+            worldName = worldRow.Name.ToString();
+        if (worldName == null) return;
+
+        string targetId      = $"{pc.Name}@{worldName}";
+        string displayName   = pc.Name.ToString();
+        if (targetId == LocalPlayerId) return;
+
+        args.AddMenuItem(new MenuItem
+        {
+            Name      = "Open Character Sheet",
+            OnClicked = _ => OpenPlayerSheet(targetId, displayName),
+        });
+        args.AddMenuItem(new MenuItem
+        {
+            Name      = "Open Skills",
+            OnClicked = _ => OpenPlayerSkills(targetId, displayName),
+        });
+    }
 
     public Models.RpCharacter GetOrCreateCharacter(string playerId)
     {

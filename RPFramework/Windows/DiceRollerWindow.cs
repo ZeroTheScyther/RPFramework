@@ -21,6 +21,17 @@ public class DiceRollerWindow : Window, IDisposable
 
     private static readonly int[]    DieSizes  = { 4, 6, 8, 10, 12, 20, 100 };
     private static readonly string[] StatNames = { "None", "STR", "DEX", "SPD", "CON", "MEM", "MTL", "INT", "CHA" };
+    private static readonly SkillStat[] StatMapping =
+    {
+        SkillStat.Str, // idx 1
+        SkillStat.Dex, // idx 2
+        SkillStat.Spd, // idx 3
+        SkillStat.Con, // idx 4
+        SkillStat.Mem, // idx 5
+        SkillStat.Mtl, // idx 6
+        SkillStat.Int, // idx 7
+        SkillStat.Cha, // idx 8
+    };
     private static readonly string[] Specializations =
     [
         "Acrobatics", "Animal Handling", "Thaumaturgy", "Arcanima", "Conjury",
@@ -96,6 +107,14 @@ public class DiceRollerWindow : Window, IDisposable
             int modVal = GetStatValue(ch, _statModifierIdx);
             ImGui.SameLine();
             ImGui.TextDisabled($"({(modVal >= 0 ? "+" : "")}{modVal})");
+
+            // AP exhaustion indicator
+            int apPen = SkillHelpers.ApPenalty(ch);
+            if (apPen < 0)
+            {
+                ImGui.SameLine();
+                ImGui.TextColored(new Vector4(1f, 0.4f, 0.2f, 1f), $"[AP {apPen}]");
+            }
         }
 
         // ── Specialization ────────────────────────────────────────────────────
@@ -206,6 +225,14 @@ public class DiceRollerWindow : Window, IDisposable
             keepHigher = true;
         }
 
+        // Append AP exhaustion tag if active
+        if (ch != null)
+        {
+            int apPen = SkillHelpers.ApPenalty(ch);
+            if (apPen < 0)
+                modeTag += $" [AP {apPen}]";
+        }
+
         int r1 = RollDie(_selectedDie);
         int rawRoll;
         string rollPart;
@@ -240,8 +267,15 @@ public class DiceRollerWindow : Window, IDisposable
     private static int RollDie(int sides) =>
         Random.Shared.Next(1, sides + 1);
 
-    private static int GetStatValue(RpCharacter ch, int statIdx) =>
-        statIdx switch
+    /// Returns the effective modifier for the given stat index, incorporating
+    /// any active passive condition adjustments and the AP exhaustion penalty.
+    private static int GetStatValue(RpCharacter ch, int statIdx)
+    {
+        if (statIdx < 1 || statIdx > 8) return 0;
+
+        SkillStat skillStat = StatMapping[statIdx - 1];
+
+        int raw = statIdx switch
         {
             1 => ch.Str,
             2 => ch.Dex,
@@ -251,6 +285,10 @@ public class DiceRollerWindow : Window, IDisposable
             6 => ch.Mtl,
             7 => ch.Int,
             8 => ch.Cha,
-            _ => 0,
+            _ => 10,
         };
+
+        int passiveAdj = SkillHelpers.PassiveStatAdjust(ch, skillStat);
+        return SkillHelpers.StatMod(raw + passiveAdj) + SkillHelpers.ApPenalty(ch);
+    }
 }

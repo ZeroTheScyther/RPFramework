@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using RPFramework.Models;
 
 namespace RPFramework.Models.Net;
 
@@ -76,4 +77,30 @@ public record BagOperationDto(
     Guid?     ItemId,
     string?   NewName,
     int?      Gil = null
+);
+
+// ── Character Profiles ────────────────────────────────────────────────────────
+
+/// <summary>Skill definition as sent over the wire. Omits session-local state (cooldownRemaining, etc.).</summary>
+public record RpSkillDto(
+    Guid                 Id,
+    string               Name,
+    string               Description,
+    SkillType            Type,
+    int                  Cooldown,
+    int                  Duration,
+    List<SkillCondition> Conditions,
+    List<SkillEffect>    Effects
+);
+
+/// <summary>Full character profile snapshot pushed to and retrieved from the relay server.</summary>
+public record CharacterProfileDto(
+    string                   PlayerId,
+    string                   DisplayName,
+    int                      HpCurrent, int HpMax,
+    int                      ApCurrent, int ApMax,
+    int                      Str, int Dex, int Spd, int Con,
+    int                      Mem, int Mtl, int Int, int Cha,
+    Dictionary<string, bool> Proficiencies,
+    List<RpSkillDto>         Skills
 );
