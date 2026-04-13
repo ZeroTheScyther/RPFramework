@@ -31,6 +31,7 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] internal static IContextMenu            ContextMenu     { get; private set; } = null!;
 
     private const string CmdHub          = "/rphub";
+    private const string CmdIni          = "/rpini";
     private const string CmdInventory    = "/rpinventory";
     private const string CmdInventoryShort = "/rpinv";
     private const string CmdBgm         = "/rpbgm";
@@ -55,6 +56,9 @@ public sealed class Plugin : IDalamudPlugin
     /// <summary>Players whose profiles have been received this session (i.e., they are/were online).</summary>
     public readonly HashSet<string> KnownOnlinePlayers = new();
 
+    /// <summary>Active initiative states, keyed by party code.</summary>
+    public readonly Dictionary<string, InitiativeStateDto> InitiativeStates = new();
+
     private bool _autoConnectPending;
 
     // Dynamic player profile windows (one per remote player ID)
@@ -65,6 +69,7 @@ public sealed class Plugin : IDalamudPlugin
     private DateTime _lastProfilePush = DateTime.MinValue;
 
     private HubWindow               HubWindow               { get; init; }
+    internal InitiativeWindow       InitiativeWindow        { get; init; }
     private InventoryWindow         InventoryWindow         { get; init; }
     private BgmWindow               BgmWindow               { get; init; }
     private BgmPlayerWindow         BgmPlayerWindow         { get; init; }
@@ -88,6 +93,7 @@ public sealed class Plugin : IDalamudPlugin
         Network    = new NetworkService();
 
         HubWindow               = new HubWindow(this);
+        InitiativeWindow        = new InitiativeWindow(this);
         TradeNotificationWindow = new TradeNotificationWindow(this);
         BagShareInviteWindow    = new BagShareInviteWindow(this);
         SettingsWindow          = new SettingsWindow(this);
@@ -99,6 +105,7 @@ public sealed class Plugin : IDalamudPlugin
         SkillsWindow            = new SkillsWindow(this);
 
         WindowSystem.AddWindow(HubWindow);
+        WindowSystem.AddWindow(InitiativeWindow);
         WindowSystem.AddWindow(InventoryWindow);
         WindowSystem.AddWindow(BgmWindow);
         WindowSystem.AddWindow(BgmPlayerWindow);
@@ -130,6 +137,9 @@ public sealed class Plugin : IDalamudPlugin
         Network.PartyMemberBgmChanged  += OnPartyMemberBgmChanged;
         Network.PartyMemberRoleChanged += OnPartyMemberRoleChanged;
         Network.BgmRoomDeleted         += OnBgmRoomDeleted;
+        Network.PartyInitiativeStarted += OnPartyInitiativeStarted;
+        Network.PartyInitiativeUpdated += OnPartyInitiativeUpdated;
+        Network.PartyInitiativeEnded   += OnPartyInitiativeEnded;
 
         ContextMenu.OnMenuOpened += OnContextMenuOpened;
 
@@ -144,6 +154,7 @@ public sealed class Plugin : IDalamudPlugin
         CommandManager.AddHandler(CmdDice,           new CommandInfo(OnDiceCmd)      { HelpMessage = "Opens dice roller, or rolls immediately: /rpdice [d4/d6/.../d20/dN]" });
         CommandManager.AddHandler(CmdSkills,         new CommandInfo(OnSkillsCmd)    { HelpMessage = "Opens the RP Skills & Passives window" });
         CommandManager.AddHandler(CmdSkillsShort,    new CommandInfo(OnSkillsCmd)    { HelpMessage = "Opens the RP Skills & Passives window" });
+        CommandManager.AddHandler(CmdIni,            new CommandInfo(OnIniCmd)       { HelpMessage = "Opens the RP Initiative tracker" });
 
         PluginInterface.UiBuilder.Draw         += WindowSystem.Draw;
         PluginInterface.UiBuilder.OpenMainUi   += HubWindow.Toggle;
@@ -177,6 +188,9 @@ public sealed class Plugin : IDalamudPlugin
         Network.PartyMemberBgmChanged  -= OnPartyMemberBgmChanged;
         Network.PartyMemberRoleChanged -= OnPartyMemberRoleChanged;
         Network.BgmRoomDeleted         -= OnBgmRoomDeleted;
+        Network.PartyInitiativeStarted -= OnPartyInitiativeStarted;
+        Network.PartyInitiativeUpdated -= OnPartyInitiativeUpdated;
+        Network.PartyInitiativeEnded   -= OnPartyInitiativeEnded;
 
         ContextMenu.OnMenuOpened -= OnContextMenuOpened;
 
@@ -191,6 +205,7 @@ public sealed class Plugin : IDalamudPlugin
 
         WindowSystem.RemoveAllWindows();
         HubWindow.Dispose();
+        InitiativeWindow.Dispose();
         InventoryWindow.Dispose();
         BgmWindow.Dispose();
         BgmPlayerWindow.Dispose();
@@ -214,6 +229,7 @@ public sealed class Plugin : IDalamudPlugin
         CommandManager.RemoveHandler(CmdDice);
         CommandManager.RemoveHandler(CmdSkills);
         CommandManager.RemoveHandler(CmdSkillsShort);
+        CommandManager.RemoveHandler(CmdIni);
     }
 
     private void OnFrameworkUpdate(IFramework framework)
@@ -266,6 +282,8 @@ public sealed class Plugin : IDalamudPlugin
         else
             OpenPlayerSkills(target, ParseDisplayName(target));
     }
+
+    private void OnIniCmd(string command, string args) => InitiativeWindow.Toggle();
 
     private void OnDiceCmd(string command, string args)
     {
@@ -468,6 +486,7 @@ public sealed class Plugin : IDalamudPlugin
     private void OnPartyDisbanded(string code)
     {
         PartyMembers.Remove(code);
+        InitiativeStates.Remove(code);
         Configuration.Parties.RemoveAll(p => p.Code == code);
         Configuration.Save();
     }
@@ -506,6 +525,7 @@ public sealed class Plugin : IDalamudPlugin
         Task.Run(() => Network.PartyLeaveAsync(code));
         // Optimistically remove locally — server will confirm via OnPartyMemberLeft / OnPartyDisbanded
         PartyMembers.Remove(code);
+        InitiativeStates.Remove(code);
         Configuration.Parties.RemoveAll(p => p.Code == code);
         Configuration.Save();
     }
@@ -538,6 +558,34 @@ public sealed class Plugin : IDalamudPlugin
 
         // Also tell the server we've left (in case we hadn't already)
         Task.Run(() => Network.BgmLeaveAsync(code));
+    }
+
+    // ── Initiative event handlers ─────────────────────────────────────────────
+
+    private void OnPartyInitiativeStarted(string code)
+    {
+        string? pid = LocalPlayerId;
+        if (pid == null) return;
+
+        // Auto-roll d24 + SPD bonus and submit
+        var ch      = GetOrCreateCharacter(pid);
+        int roll     = new Random().Next(1, 25);          // d24: 1–24
+        int spdBonus = SkillHelpers.StatMod(ch.Spd);     // floor((SPD-10)/2), e.g. 20→+5, 10→+0
+        Task.Run(() => Network.PartySubmitRollAsync(code, roll, spdBonus));
+
+        InitiativeWindow.IsOpen = true;
+    }
+
+    private void OnPartyInitiativeUpdated(string code, InitiativeStateDto state)
+    {
+        InitiativeStates[code] = state;
+        InitiativeWindow.IsOpen = true;
+    }
+
+    private void OnPartyInitiativeEnded(string code)
+    {
+        InitiativeStates.Remove(code);
+        // Leave the window open so players can see the result; they close it manually
     }
 
     // ── Shared bags public helper ─────────────────────────────────────────────

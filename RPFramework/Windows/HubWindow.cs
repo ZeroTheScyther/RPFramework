@@ -198,8 +198,12 @@ public class HubWindow : Window, IDisposable
         var parties = plugin.Configuration.Parties;
         var filtered = string.IsNullOrWhiteSpace(_searchQuery)
             ? parties
-            : parties.Where(p => p.Name.Contains(_searchQuery, StringComparison.OrdinalIgnoreCase)
-                               || p.Code.Contains(_searchQuery, StringComparison.OrdinalIgnoreCase))
+            : parties.Where(p =>
+                p.Name.Contains(_searchQuery, StringComparison.OrdinalIgnoreCase)
+             || p.Code.Contains(_searchQuery, StringComparison.OrdinalIgnoreCase)
+             || (plugin.PartyMembers.TryGetValue(p.Code, out var ms) && ms.Any(m =>
+                    m.DisplayName.Contains(_searchQuery, StringComparison.OrdinalIgnoreCase)
+                 || m.PlayerId.Contains(_searchQuery, StringComparison.OrdinalIgnoreCase))))
                      .ToList();
 
         if (filtered.Count == 0)

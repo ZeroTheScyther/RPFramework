@@ -62,6 +62,11 @@ public class NetworkService : IDisposable
     public event Action<CharacterProfileDto>? ProfileReceived;
     public event Action<string>?              ProfileFetchFailed; // playerId
 
+    // ── Initiative events ─────────────────────────────────────────────────────
+    public event Action<string>?                     PartyInitiativeStarted;  // partyCode
+    public event Action<string, InitiativeStateDto>? PartyInitiativeUpdated;  // partyCode, state
+    public event Action<string>?                     PartyInitiativeEnded;    // partyCode
+
     // ── Party events ──────────────────────────────────────────────────────────
     public event Action<PartyInfoDto>?           PartyInfoReceived;
     public event Action<string, PartyMemberDto>? PartyMemberJoined;       // code, member
@@ -205,6 +210,14 @@ public class NetworkService : IDisposable
         _conn.On<string, PartyMemberDto>("OnPartyMemberRoleChanged",
             (code, m) => Fire(() => PartyMemberRoleChanged?.Invoke(code, m)));
 
+        // Initiative
+        _conn.On<string>("OnPartyInitiativeStarted",
+            code => Fire(() => PartyInitiativeStarted?.Invoke(code)));
+        _conn.On<string, InitiativeStateDto>("OnPartyInitiativeUpdated",
+            (code, state) => Fire(() => PartyInitiativeUpdated?.Invoke(code, state)));
+        _conn.On<string>("OnPartyInitiativeEnded",
+            code => Fire(() => PartyInitiativeEnded?.Invoke(code)));
+
         // Errors
         _conn.On<string, string>("OnError",
             (feat, msg) => Fire(() => ErrorReceived?.Invoke(feat, msg)));
@@ -321,6 +334,22 @@ public class NetworkService : IDisposable
         try { return await _conn!.InvokeAsync<PartyInfoDto?>("PartyJoin", code, password); }
         catch (Exception ex) { Plugin.Log.Warning(ex, "[Net] PartyJoin failed."); return null; }
     }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // Initiative
+    // ═════════════════════════════════════════════════════════════════════════
+
+    public Task PartyStartInitiativeAsync(string code)
+        => SafeInvoke("PartyStartInitiative", code);
+
+    public Task PartySubmitRollAsync(string code, int roll, int spdBonus)
+        => SafeInvoke("PartySubmitRoll", code, roll, spdBonus);
+
+    public Task PartyEndTurnAsync(string code)
+        => SafeInvoke("PartyEndTurn", code);
+
+    public Task PartyEndCombatAsync(string code)
+        => SafeInvoke("PartyEndCombat", code);
 
     public Task PartyLeaveAsync(string code)
         => SafeInvoke("PartyLeave", code);

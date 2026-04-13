@@ -105,6 +105,17 @@ public record CharacterProfileDto(
     List<RpSkillDto>         Skills
 );
 
+// ── Initiative ────────────────────────────────────────────────────────────────
+
+public record InitiativeEntryDto(string PlayerId, string DisplayName, int Roll, int SpdBonus, int Total);
+
+public record InitiativeStateDto(
+    string                   PartyCode,
+    List<InitiativeEntryDto> Order,
+    int                      CurrentIndex,
+    bool                     IsActive
+);
+
 // ── Parties ───────────────────────────────────────────────────────────────────
 
 public enum PartyRole { Member, CoDm, Owner }
