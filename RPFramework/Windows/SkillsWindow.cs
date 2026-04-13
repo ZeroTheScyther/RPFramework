@@ -56,18 +56,6 @@ public class SkillsWindow : Window, IDisposable
         {
             if (leftChild)
             {
-                if (ImGui.Button("Next Turn##rpsk_nextturn", new Vector2(-1, 0)))
-                {
-                    foreach (var s in ch.Skills)
-                    {
-                        if (s.CooldownRemaining  > 0) s.CooldownRemaining--;
-                        if (s.DurationRemaining > 0) s.DurationRemaining--;
-                    }
-                    plugin.Configuration.Save();
-                }
-
-                ImGui.Spacing();
-                ImGui.Separator();
                 ImGui.Spacing();
 
                 int deleteAt = -1;
@@ -76,8 +64,10 @@ public class SkillsWindow : Window, IDisposable
                 {
                     var sk    = ch.Skills[i];
                     string badge = sk.Type == SkillType.Active ? "[A]" : "[P]";
-                    string tag   = sk.DurationRemaining > 0 ? $" [{sk.DurationRemaining}t]"
-                                 : sk.CooldownRemaining > 0 ? $" (cd:{sk.CooldownRemaining})"
+                    string tag   = sk.DurationRemaining > 0
+                                 ? $" [{sk.DurationRemaining} turn{(sk.DurationRemaining == 1 ? "" : "s")}]"
+                                 : sk.CooldownRemaining > 0
+                                 ? $" (cd:{sk.CooldownRemaining} turn{(sk.CooldownRemaining == 1 ? "" : "s")})"
                                  : "";
                     string label = $"{badge} {sk.Name}{tag}##rpsk_{i}";
 
@@ -178,6 +168,17 @@ public class SkillsWindow : Window, IDisposable
         if (ImGui.RadioButton("Active##rpsk_ta",  ref typeVal, 0)) { skill.Type = SkillType.Active;  _dirty = true; }
         ImGui.SameLine();
         if (ImGui.RadioButton("Passive##rpsk_tp", ref typeVal, 1)) { skill.Type = SkillType.Passive; _dirty = true; }
+
+        // Turn End trigger (passive only)
+        if (skill.Type == SkillType.Passive)
+        {
+            ImGui.Spacing();
+            bool tot = skill.TriggerOnTurnEnd;
+            if (ImGui.Checkbox("Trigger on Turn End##rpsk_tote", ref tot))
+            { skill.TriggerOnTurnEnd = tot; _dirty = true; }
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Effects are applied each time you press End Turn in the Initiative window.");
+        }
 
         // Cooldown
         ImGui.Spacing();
@@ -358,12 +359,17 @@ public class SkillsWindow : Window, IDisposable
         if (skill.Cooldown > 0)
         {
             ImGui.SameLine();
-            ImGui.TextDisabled($"  Cooldown: {skill.Cooldown}t");
+            ImGui.TextDisabled($"  Cooldown: {skill.Cooldown} turn{(skill.Cooldown == 1 ? "" : "s")}");
         }
         if (skill.Duration > 0)
         {
             ImGui.SameLine();
-            ImGui.TextDisabled($"  Duration: {skill.Duration}t");
+            ImGui.TextDisabled($"  Duration: {skill.Duration} turn{(skill.Duration == 1 ? "" : "s")}");
+        }
+        if (skill.Type == SkillType.Passive && skill.TriggerOnTurnEnd)
+        {
+            ImGui.SameLine();
+            ImGui.TextColored(new Vector4(0.85f, 0.70f, 0.15f, 1f), "  [Turn End]");
         }
 
         ImGui.Spacing();

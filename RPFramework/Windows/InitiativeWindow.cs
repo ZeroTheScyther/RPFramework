@@ -7,6 +7,7 @@ using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
 using Dalamud.Interface.Windowing;
+using RPFramework.Models;
 using RPFramework.Models.Net;
 
 namespace RPFramework.Windows;
@@ -226,14 +227,25 @@ public class InitiativeWindow : Window, IDisposable
                 // Only tick own cooldowns/durations if it's actually our turn
                 if (isMyTurn)
                 {
-                    var ch    = _plugin.GetOrCreateCharacter(pid);
+                    var  ch    = _plugin.GetOrCreateCharacter(pid);
                     bool dirty = false;
                     foreach (var s in ch.Skills)
                     {
                         if (s.CooldownRemaining  > 0) { s.CooldownRemaining--;  dirty = true; }
                         if (s.DurationRemaining > 0) { s.DurationRemaining--; dirty = true; }
+
+                        // Fire any "Trigger on Turn End" passive effects
+                        if (s.Type == SkillType.Passive && s.TriggerOnTurnEnd && s.CooldownRemaining == 0)
+                        {
+                            SkillHelpers.ApplyEffects(s, ch);
+                            dirty = true;
+                        }
                     }
-                    if (dirty) _plugin.Configuration.Save();
+                    if (dirty)
+                    {
+                        _plugin.Configuration.Save();
+                        _plugin.PushLocalProfile();
+                    }
                 }
                 string partyCode = state.PartyCode;
                 Task.Run(() => _plugin.Network.PartyEndTurnAsync(partyCode));

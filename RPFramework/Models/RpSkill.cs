@@ -43,4 +43,6 @@ public class RpSkill
     /// Passives with conditions auto-evaluate at roll time; empty = manually triggered.
     public List<SkillCondition> Conditions        { get; set; } = new();
     public List<SkillEffect>    Effects           { get; set; } = new();
+    /// When true, this passive's effects are applied each time the player presses End Turn in the Initiative window.
+    public bool                 TriggerOnTurnEnd  { get; set; } = false;
 }

@@ -10,6 +10,7 @@ using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
 using Dalamud.Interface.Windowing;
 using Dalamud.Utility;
+using RPFramework.Models;
 using RPFramework.Models.Net;
 
 namespace RPFramework.Windows;
@@ -262,11 +263,24 @@ public class HubWindow : Window, IDisposable
                 _flyoutPos = r; _flyoutPending = true;
             }
 
+            bool   inCombat  = plugin.InitiativeStates.ContainsKey(party.Code);
+            string combatTag = "  In Combat";
+            float  combatW   = inCombat
+                ? (ImGui.CalcTextSize(combatTag).X + ImGui.GetStyle().ItemSpacing.X)
+                : 0f;
+
             ImGui.SameLine(leftEnd);
-            float maxW = windowEndX - ellipsisW - ImGui.GetStyle().ItemSpacing.X - leftEnd;
+            float maxW = windowEndX - ellipsisW - ImGui.GetStyle().ItemSpacing.X - leftEnd - combatW;
             ImGui.TextUnformatted(Truncate($"{party.Name}  [{onlineCount}]", maxW));
             if (ImGui.IsItemHovered())
                 ImGui.SetTooltip($"{party.Code}   {onlineCount} online");
+
+            if (inCombat)
+            {
+                ImGui.SameLine();
+                ImGui.TextColored(new Vector4(0.90f, 0.25f, 0.25f, 1f), combatTag);
+                if (ImGui.IsItemHovered()) ImGui.SetTooltip("Initiative is active in this party");
+            }
         }
         _hovered[rowId] = ImGui.IsItemHovered();
 
@@ -483,6 +497,28 @@ public class HubWindow : Window, IDisposable
                 ImGui.TextDisabled(party.Name);
                 ImGui.TextDisabled(party.Code);
                 ImGui.Separator();
+
+                // Join Combat — shown when initiative is active and this player hasn't rolled yet
+                string? localPid = plugin.LocalPlayerId;
+                if (localPid != null
+                    && plugin.InitiativeStates.TryGetValue(party.Code, out var iniState)
+                    && !iniState.Order.Any(e => e.PlayerId == localPid))
+                {
+                    if (MenuButton(FontAwesomeIcon.Bolt, "Join Combat", "jc_" + party.Code))
+                    {
+                        var ch       = plugin.GetOrCreateCharacter(localPid);
+                        int roll     = new Random().Next(1, 25);
+                        int spdBonus = SkillHelpers.StatMod(ch.Spd);
+                        string code  = party.Code;
+                        Task.Run(() => plugin.Network.PartySubmitRollAsync(code, roll, spdBonus));
+                        plugin.InitiativeWindow.IsOpen = true;
+                        ImGui.CloseCurrentPopup();
+                    }
+                    if (ImGui.IsItemHovered())
+                        ImGui.SetTooltip("Roll initiative and join the current combat round.");
+                    ImGui.Separator();
+                }
+
                 if (MenuButton(FontAwesomeIcon.Copy, "Copy Party Code", "pcp_" + party.Code))
                 { ImGui.SetClipboardText(party.Code); ImGui.CloseCurrentPopup(); }
                 ImGui.Separator();
