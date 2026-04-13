@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Numerics;
 using System.Threading.Tasks;
 using Dalamud.Bindings.ImGui;
@@ -7,6 +8,7 @@ using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
 using Dalamud.Interface.Windowing;
 using RPFramework.Models;
+using RPFramework.Models.Net;
 using RPFramework.Services;
 
 namespace RPFramework.Windows;
@@ -108,9 +110,13 @@ public class BgmWindow : Window, IDisposable
                         if (ImGui.MenuItem("Delete room"))
                         {
                             if (bgmService.CurrentRoom == room) bgmService.Stop();
+                            string roomCode = room.Code;
                             rooms.RemoveAt(i);
                             if (selectedRoom >= rooms.Count) selectedRoom = rooms.Count - 1;
                             plugin.Configuration.Save();
+                            // If connected, broadcast deletion to all room members (server enforces owner-only)
+                            if (plugin.Network.IsConnected)
+                                Task.Run(() => plugin.Network.BgmDeleteAsync(roomCode));
                             ImGui.CloseCurrentPopup();
                         }
                         ImGui.EndPopup();
@@ -121,6 +127,8 @@ public class BgmWindow : Window, IDisposable
 
                 if (rooms.Count == 0)
                     ImGui.TextDisabled("No rooms. Click '+ Create Room' to start.");
+
+                DrawPartyRooms();
             }
         }
 
@@ -141,6 +149,62 @@ public class BgmWindow : Window, IDisposable
 
         DrawCreateModal(rooms);
         DrawJoinModal(rooms);
+    }
+
+    private void DrawPartyRooms()
+    {
+        // Collect all room codes currently occupied by party members (not self)
+        string? localId = plugin.LocalPlayerId;
+        var partyRooms = new List<(string RoomCode, string MemberName, string PartyName)>();
+
+        foreach (var party in plugin.Configuration.Parties)
+        {
+            if (!plugin.PartyMembers.TryGetValue(party.Code, out var members)) continue;
+            foreach (var member in members)
+            {
+                if (member.PlayerId == localId) continue;
+                foreach (var roomCode in member.BgmRoomCodes)
+                {
+                    // Skip rooms the local player is already in
+                    if (plugin.Configuration.Rooms.Any(r => r.Code == roomCode)) continue;
+                    partyRooms.Add((roomCode, member.DisplayName, party.Name));
+                }
+            }
+        }
+
+        if (partyRooms.Count == 0) return;
+
+        ImGui.Spacing();
+        ImGui.Separator();
+
+        bool expanded = ImGui.TreeNodeEx("##partyroomsnode",
+            ImGuiTreeNodeFlags.SpanAvailWidth | ImGuiTreeNodeFlags.DefaultOpen,
+            $"Party Rooms ({partyRooms.Count})");
+        if (!expanded) return;
+
+        foreach (var (roomCode, memberName, partyName) in partyRooms)
+        {
+            ImGui.TextDisabled($"  {memberName}");
+            ImGui.SameLine();
+            ImGui.TextUnformatted(roomCode);
+            ImGui.SameLine();
+            ImGui.TextDisabled($"({partyName})");
+            ImGui.SameLine();
+            if (ImGui.SmallButton($"Join##{roomCode}_{memberName}"))
+            {
+                var code = roomCode;
+                var name = $"Room {roomCode}";
+                var room = new RpRoom { Name = name, Code = code };
+                plugin.Configuration.Rooms.Add(room);
+                selectedRoom = plugin.Configuration.Rooms.Count - 1;
+                plugin.Configuration.Save();
+                Task.Run(() => plugin.Network.BgmJoinAsync(code));
+                playerWindow.OpenRoom(room, bgmService);
+                playerWindow.IsOpen = true;
+            }
+        }
+
+        ImGui.TreePop();
     }
 
     private void DrawNotConnected()

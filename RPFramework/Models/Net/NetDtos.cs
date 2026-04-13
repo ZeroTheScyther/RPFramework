@@ -104,3 +104,21 @@ public record CharacterProfileDto(
     Dictionary<string, bool> Proficiencies,
     List<RpSkillDto>         Skills
 );
+
+// ── Parties ───────────────────────────────────────────────────────────────────
+
+public enum PartyRole { Member, CoDm, Owner }
+
+public record PartyMemberDto(
+    string       PlayerId,
+    string       DisplayName,
+    PartyRole    Role,
+    List<string> BgmRoomCodes   // BGM room codes this member is currently in
+);
+
+public record PartyInfoDto(
+    string               Code,
+    string               Name,
+    string               OwnerPlayerId,
+    List<PartyMemberDto> Members
+);

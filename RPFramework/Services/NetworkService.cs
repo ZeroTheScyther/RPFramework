@@ -17,11 +17,11 @@ public class NetworkService : IDisposable
     private HubConnection? _conn;
     private readonly SemaphoreSlim _connectLock = new(1, 1);
 
-    // Track which BGM rooms we're in so we can re-join on reconnect
-    private readonly HashSet<string>     _activeRooms = new();
-    private readonly HashSet<Guid>       _activeBags  = new();
-    private          string              _playerId    = string.Empty;
-    private          string              _displayName = string.Empty;
+    // Track which BGM rooms and bags we're in so we can re-join on reconnect
+    private readonly HashSet<string> _activeRooms = new();
+    private readonly HashSet<Guid>   _activeBags  = new();
+    private          string          _playerId    = string.Empty;
+    private          string          _displayName = string.Empty;
 
     public HubConnectionState State => _conn?.State ?? HubConnectionState.Disconnected;
     public bool IsConnected => State == HubConnectionState.Connected;
@@ -30,23 +30,24 @@ public class NetworkService : IDisposable
     /// <summary>Fired (on framework thread) when an initial connection is established.</summary>
     public event Action? Connected;
 
-    /// <summary>Fired (on framework thread) after an automatic reconnect completes. Rooms are already re-joined by NetworkService — subscribers must NOT call BgmJoinAsync again.</summary>
+    /// <summary>Fired (on framework thread) after an automatic reconnect completes.</summary>
     public event Action? Reconnected;
 
     // ── BGM events ────────────────────────────────────────────────────────────
-    public event Action<RoomStateDto>?              BgmRoomStateReceived;
-    public event Action<string, RoomMemberDto>?     BgmMemberJoined;      // code, member
-    public event Action<string, string>?            BgmMemberLeft;        // code, playerId
-    public event Action<string, RoomMemberDto>?     BgmMemberRoleChanged; // code, member
-    public event Action<string, PlaybackCommandDto>? BgmPlaybackCommand;  // code, cmd
-    public event Action<string, RpSongDto, int>?    BgmSongAdded;         // code, song, idx
-    public event Action<string, Guid>?              BgmSongRemoved;       // code, songId
+    public event Action<RoomStateDto>?               BgmRoomStateReceived;
+    public event Action<string, RoomMemberDto>?      BgmMemberJoined;      // code, member
+    public event Action<string, string>?             BgmMemberLeft;        // code, playerId
+    public event Action<string, RoomMemberDto>?      BgmMemberRoleChanged; // code, member
+    public event Action<string, PlaybackCommandDto>? BgmPlaybackCommand;   // code, cmd
+    public event Action<string, RpSongDto, int>?     BgmSongAdded;         // code, song, idx
+    public event Action<string, Guid>?               BgmSongRemoved;       // code, songId
+    public event Action<string>?                     BgmRoomDeleted;       // code
 
     // ── Trade events ──────────────────────────────────────────────────────────
-    public event Action<TradeOfferDto>?  TradeOfferReceived;
-    public event Action<Guid, bool, Guid>? TradeAccepted;   // offerId, isCopy, itemId
-    public event Action<Guid>?           TradeRejected;
-    public event Action<Guid, RpItemDto, bool>? TradeItemReceived; // offerId, item, isCopy
+    public event Action<TradeOfferDto>?        TradeOfferReceived;
+    public event Action<Guid, bool, Guid>?     TradeAccepted;       // offerId, isCopy, itemId
+    public event Action<Guid>?                 TradeRejected;
+    public event Action<Guid, RpItemDto, bool>? TradeItemReceived;  // offerId, item, isCopy
 
     // ── Shared bag events ─────────────────────────────────────────────────────
     public event Action<SharedBagDto, string, string>? BagShareInviteReceived; // bag, fromId, fromName
@@ -60,6 +61,14 @@ public class NetworkService : IDisposable
     // ── Character profiles ────────────────────────────────────────────────────
     public event Action<CharacterProfileDto>? ProfileReceived;
     public event Action<string>?              ProfileFetchFailed; // playerId
+
+    // ── Party events ──────────────────────────────────────────────────────────
+    public event Action<PartyInfoDto>?           PartyInfoReceived;
+    public event Action<string, PartyMemberDto>? PartyMemberJoined;       // code, member
+    public event Action<string, string>?         PartyMemberLeft;         // code, playerId
+    public event Action<string>?                 PartyDisbanded;          // code
+    public event Action<string, string, List<string>>? PartyMemberBgmChanged;  // code, playerId, bgmRoomCodes
+    public event Action<string, PartyMemberDto>?       PartyMemberRoleChanged; // code, member (with new role)
 
     // ── Generic error ─────────────────────────────────────────────────────────
     public event Action<string, string>? ErrorReceived; // feature, message
@@ -86,14 +95,13 @@ public class NetworkService : IDisposable
 
             RegisterHandlers();
 
-            _conn.Reconnecting  += _ => { Plugin.Log.Info("[Net] Reconnecting..."); return Task.CompletedTask; };
-            _conn.Reconnected   += async _ =>
+            _conn.Reconnecting += _ => { Plugin.Log.Info("[Net] Reconnecting..."); return Task.CompletedTask; };
+            _conn.Reconnected  += async _ =>
             {
                 Plugin.Log.Info("[Net] Reconnected — re-identifying and re-joining rooms.");
                 await SafeInvoke("Identify", _playerId, _displayName);
                 foreach (var code in _activeRooms) await SafeInvoke("BgmJoin", code);
                 foreach (var id   in _activeBags)  await SafeInvoke("BagShareAccept", id);
-                // Fire Reconnected (NOT Connected) — rooms already re-joined, subscribers must not call BgmJoinAsync again
                 await Plugin.Framework.RunOnFrameworkThread(() => Reconnected?.Invoke());
             };
             _conn.Closed += ex =>
@@ -136,65 +144,66 @@ public class NetworkService : IDisposable
         // BGM
         _conn.On<RoomStateDto>("OnBgmRoomState",
             s => Fire(() => BgmRoomStateReceived?.Invoke(s)));
-
         _conn.On<string, RoomMemberDto>("OnBgmMemberJoined",
             (code, m) => Fire(() => BgmMemberJoined?.Invoke(code, m)));
-
         _conn.On<string, string>("OnBgmMemberLeft",
             (code, pid) => Fire(() => BgmMemberLeft?.Invoke(code, pid)));
-
         _conn.On<string, RoomMemberDto>("OnBgmMemberRoleChanged",
             (code, m) => Fire(() => BgmMemberRoleChanged?.Invoke(code, m)));
-
         _conn.On<string, PlaybackCommandDto>("OnBgmPlaybackCommand",
             (code, cmd) => Fire(() => BgmPlaybackCommand?.Invoke(code, cmd)));
-
         _conn.On<string, RpSongDto, int>("OnBgmSongAdded",
             (code, song, idx) => Fire(() => BgmSongAdded?.Invoke(code, song, idx)));
-
         _conn.On<string, Guid>("OnBgmSongRemoved",
             (code, id) => Fire(() => BgmSongRemoved?.Invoke(code, id)));
+        _conn.On<string>("OnBgmRoomDeleted",
+            code => { _activeRooms.Remove(code); Fire(() => BgmRoomDeleted?.Invoke(code)); });
 
         // Trading
         _conn.On<TradeOfferDto>("OnTradeOfferReceived",
             o => Fire(() => TradeOfferReceived?.Invoke(o)));
-
         _conn.On<Guid, bool, Guid>("OnTradeAccepted",
             (id, isCopy, itemId) => Fire(() => TradeAccepted?.Invoke(id, isCopy, itemId)));
-
         _conn.On<Guid>("OnTradeRejected",
             id => Fire(() => TradeRejected?.Invoke(id)));
-
         _conn.On<Guid, RpItemDto, bool>("OnTradeItemReceived",
             (id, item, isCopy) => Fire(() => TradeItemReceived?.Invoke(id, item, isCopy)));
 
         // Shared bags
         _conn.On<SharedBagDto, string, string>("OnBagShareInvite",
             (bag, fromId, fromName) => Fire(() => BagShareInviteReceived?.Invoke(bag, fromId, fromName)));
-
         _conn.On<SharedBagDto>("OnBagStateReceived",
             b => Fire(() => BagStateReceived?.Invoke(b)));
-
         _conn.On<BagOperationDto, long>("OnBagOperationApplied",
             (op, v) => Fire(() => BagOperationApplied?.Invoke(op, v)));
-
         _conn.On<Guid>("OnBagDissolved",
             id => { _activeBags.Remove(id); Fire(() => BagDissolved?.Invoke(id)); });
-
         _conn.On<Guid, string>("OnBagParticipantLeft",
             (id, pid) => Fire(() => BagParticipantLeft?.Invoke(id, pid)));
-
         _conn.On<Guid, string, string>("OnBagParticipantJoined",
             (id, pid, name) => Fire(() => BagParticipantJoined?.Invoke(id, pid, name)));
-
         _conn.On<Guid, string>("OnBagParticipantDeclined",
             (id, pid) => Fire(() => BagParticipantDeclined?.Invoke(id, pid)));
 
         // Character profiles
         _conn.On<CharacterProfileDto>("OnProfileReceived",
-            p   => Fire(() => ProfileReceived?.Invoke(p)));
+            p => Fire(() => ProfileReceived?.Invoke(p)));
         _conn.On<string>("OnProfileNotFound",
             pid => Fire(() => ProfileFetchFailed?.Invoke(pid)));
+
+        // Parties
+        _conn.On<PartyInfoDto>("OnPartyInfo",
+            dto => Fire(() => PartyInfoReceived?.Invoke(dto)));
+        _conn.On<string, PartyMemberDto>("OnPartyMemberJoined",
+            (code, m) => Fire(() => PartyMemberJoined?.Invoke(code, m)));
+        _conn.On<string, string>("OnPartyMemberLeft",
+            (code, pid) => Fire(() => PartyMemberLeft?.Invoke(code, pid)));
+        _conn.On<string>("OnPartyDisbanded",
+            code => Fire(() => PartyDisbanded?.Invoke(code)));
+        _conn.On<string, string, List<string>>("OnPartyMemberBgmChanged",
+            (code, pid, rooms) => Fire(() => PartyMemberBgmChanged?.Invoke(code, pid, rooms)));
+        _conn.On<string, PartyMemberDto>("OnPartyMemberRoleChanged",
+            (code, m) => Fire(() => PartyMemberRoleChanged?.Invoke(code, m)));
 
         // Errors
         _conn.On<string, string>("OnError",
@@ -217,26 +226,31 @@ public class NetworkService : IDisposable
         await SafeInvoke("BgmLeave", code);
     }
 
+    /// <summary>Owner-only: deletes the BGM room, broadcasting removal to all members.</summary>
+    public async Task BgmDeleteAsync(string code)
+    {
+        _activeRooms.Remove(code);
+        await SafeInvoke("BgmDelete", code);
+    }
+
     public Task BgmSyncPlay(string code, int songIndex, double pos)
         => SafeInvoke("BgmSyncPlay", code, songIndex, pos);
-
     public Task BgmSyncPause(string code, double pos)
         => SafeInvoke("BgmSyncPause", code, pos);
-
     public Task BgmSyncResume(string code, double pos)
         => SafeInvoke("BgmSyncResume", code, pos);
-
     public Task BgmSyncSeek(string code, double pos)
         => SafeInvoke("BgmSyncSeek", code, pos);
-
     public Task BgmSyncStop(string code)
         => SafeInvoke("BgmSyncStop", code);
-
     public Task BgmSyncLoopMode(string code, NetLoopMode loop)
         => SafeInvoke("BgmSyncLoopMode", code, loop);
-
     public Task BgmSendAddSong(string code, RpSongDto song)
         => SafeInvoke("BgmAddSong", code, song);
+    public Task BgmSendRemoveSong(string code, Guid songId)
+        => SafeInvoke("BgmRemoveSong", code, songId);
+    public Task BgmPromoteMember(string code, string targetPlayerId, RoomRole role)
+        => SafeInvoke("BgmPromoteMember", code, targetPlayerId, role);
 
     // ═════════════════════════════════════════════════════════════════════════
     // Character Profiles
@@ -248,19 +262,12 @@ public class NetworkService : IDisposable
     public Task FetchProfileAsync(string playerId)
         => SafeInvoke("FetchProfile", playerId);
 
-    public Task BgmSendRemoveSong(string code, Guid songId)
-        => SafeInvoke("BgmRemoveSong", code, songId);
-
-    public Task BgmPromoteMember(string code, string targetPlayerId, RoomRole role)
-        => SafeInvoke("BgmPromoteMember", code, targetPlayerId, role);
-
     // ═════════════════════════════════════════════════════════════════════════
     // Trading
     // ═════════════════════════════════════════════════════════════════════════
 
     public Task SendTradeOffer(string targetPlayerId, RpItemDto item, bool isCopy)
         => SafeInvoke("InventoryTrade", targetPlayerId, item, isCopy);
-
     public Task AcceptTrade(Guid offerId) => SafeInvoke("InventoryTradeAccept", offerId);
     public Task RejectTrade(Guid offerId) => SafeInvoke("InventoryTradeReject", offerId);
 
@@ -280,8 +287,7 @@ public class NetworkService : IDisposable
         await SafeInvoke("BagShareAccept", bagId);
     }
 
-    public Task RejectBagShare(Guid bagId)  => SafeInvoke("BagShareReject", bagId);
-
+    public Task RejectBagShare(Guid bagId)      => SafeInvoke("BagShareReject", bagId);
     public Task ApplyBagOperation(BagOperationDto op) => SafeInvoke("BagApplyOperation", op);
 
     public async Task DissolveBag(Guid bagId)
@@ -295,6 +301,35 @@ public class NetworkService : IDisposable
         _activeBags.Remove(bagId);
         await SafeInvoke("BagDisconnect", bagId);
     }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // Parties
+    // ═════════════════════════════════════════════════════════════════════════
+
+    /// <summary>Creates a new party. Returns PartyInfoDto on success, null if disconnected or server rejects.</summary>
+    public async Task<PartyInfoDto?> PartyCreateAsync(string name, string password)
+    {
+        if (!IsConnected) return null;
+        try { return await _conn!.InvokeAsync<PartyInfoDto?>("PartyCreate", name, password); }
+        catch (Exception ex) { Plugin.Log.Warning(ex, "[Net] PartyCreate failed."); return null; }
+    }
+
+    /// <summary>Joins an existing party by code + password. Returns PartyInfoDto on success, null on failure.</summary>
+    public async Task<PartyInfoDto?> PartyJoinAsync(string code, string password)
+    {
+        if (!IsConnected) return null;
+        try { return await _conn!.InvokeAsync<PartyInfoDto?>("PartyJoin", code, password); }
+        catch (Exception ex) { Plugin.Log.Warning(ex, "[Net] PartyJoin failed."); return null; }
+    }
+
+    public Task PartyLeaveAsync(string code)
+        => SafeInvoke("PartyLeave", code);
+
+    public Task PartyKickAsync(string code, string targetPlayerId)
+        => SafeInvoke("PartyKick", code, targetPlayerId);
+
+    public Task PartySetRoleAsync(string code, string targetPlayerId, PartyRole newRole)
+        => SafeInvoke("PartySetRole", code, targetPlayerId, newRole);
 
     // ═════════════════════════════════════════════════════════════════════════
     // Helpers

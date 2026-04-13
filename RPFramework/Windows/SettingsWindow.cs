@@ -4,7 +4,6 @@ using System.Threading.Tasks;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Utility;
 using Dalamud.Interface.Windowing;
-using RPFramework.Services;
 
 namespace RPFramework.Windows;
 
@@ -12,94 +11,99 @@ public class SettingsWindow : Window, IDisposable
 {
     private readonly Plugin plugin;
 
-    private string serverUrl = string.Empty;
+    private string serverUrlBuf = string.Empty;
+    private bool   urlDirty;
 
     public SettingsWindow(Plugin plugin)
         : base("RPFramework Settings##RPFramework.Settings",
                ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse)
     {
-        this.plugin = plugin;
+        this.plugin    = plugin;
         SizeConstraints = new WindowSizeConstraints
         {
-            MinimumSize = new Vector2(340, 200),
-            MaximumSize = new Vector2(600, 500),
+            MinimumSize = new Vector2(320, 180),
+            MaximumSize = new Vector2(560, 360),
         };
-        Size          = new Vector2(400, 240);
+        Size          = new Vector2(380, 220);
         SizeCondition = ImGuiCond.FirstUseEver;
+    }
+
+    public override void OnOpen()
+    {
+        serverUrlBuf = plugin.Configuration.ServerUrl;
+        urlDirty     = false;
     }
 
     public void Dispose() { }
 
-    public override void OnOpen()
-    {
-        serverUrl = plugin.Configuration.ServerUrl;
-    }
-
     public override void Draw()
     {
-        // ── Server ───────────────────────────────────────────────────────────
-        ImGui.TextUnformatted("Relay Server");
+        float btnW = 110 * ImGuiHelpers.GlobalScale;
+
+        // ── Server Connection ────────────────────────────────────────────────
+        ImGui.TextUnformatted("Server Connection");
         ImGui.Separator();
 
-        ImGui.TextDisabled("URL:");
-        ImGui.SameLine();
+        ImGui.TextDisabled("Server URL");
+        ImGui.SetNextItemWidth(-1);
+        if (ImGui.InputText("##serverurl", ref serverUrlBuf, 256))
+            urlDirty = true;
 
         bool connected = plugin.Network.IsConnected;
-        var  dot       = connected
+        var  dotColor  = connected
             ? new Vector4(0.3f, 0.85f, 0.3f, 1f)
             : new Vector4(0.55f, 0.55f, 0.55f, 1f);
-        ImGui.TextColored(dot, "●");
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip(connected ? "Connected" : "Disconnected");
 
-        ImGui.SetNextItemWidth(-1);
-        ImGui.InputText("##rpserverurl", ref serverUrl, 256);
-
-        float btnW = 100 * ImGuiHelpers.GlobalScale;
-
-        bool urlChanged = serverUrl != plugin.Configuration.ServerUrl;
-        if (!urlChanged) ImGui.BeginDisabled();
-        if (ImGui.Button("Save##rpsrvsave", new Vector2(btnW, 0)))
-        {
-            plugin.Configuration.ServerUrl = serverUrl.Trim();
-            plugin.Configuration.Save();
-        }
-        if (!urlChanged) ImGui.EndDisabled();
-
+        ImGui.TextColored(dotColor, "●");
+        ImGui.SameLine();
+        ImGui.TextDisabled(connected ? "Connected" : "Disconnected");
         ImGui.SameLine();
 
-        if (connected)
+        if (urlDirty)
         {
-            if (ImGui.Button("Disconnect##rpsrvdisconn", new Vector2(btnW, 0)))
+            if (ImGui.Button("Save & Reconnect##savereconnect", new Vector2(btnW * 1.4f, 0)))
+            {
+                plugin.Configuration.ServerUrl = serverUrlBuf.Trim();
+                plugin.Configuration.Save();
+                urlDirty = false;
+                string url  = plugin.Configuration.ServerUrl;
+                string? id  = plugin.LocalPlayerId;
+                string name = plugin.LocalDisplayName;
+                if (id != null)
+                    Task.Run(() => plugin.Network.ConnectAsync(url, id, name));
+            }
+        }
+        else if (connected)
+        {
+            if (ImGui.Button("Disconnect##disconnect", new Vector2(btnW, 0)))
                 Task.Run(() => plugin.Network.DisconnectAsync());
         }
         else
         {
-            if (ImGui.Button("Connect##rpsrvconn", new Vector2(btnW, 0)))
+            if (ImGui.Button("Connect##connect", new Vector2(btnW, 0)))
             {
-                string url     = plugin.Configuration.ServerUrl;
-                string? id     = plugin.LocalPlayerId;
-                string  name   = plugin.LocalDisplayName;
+                string url  = plugin.Configuration.ServerUrl;
+                string? id  = plugin.LocalPlayerId;
+                string name = plugin.LocalDisplayName;
                 if (id != null)
                     Task.Run(() => plugin.Network.ConnectAsync(url, id, name));
-                else
-                    ImGui.SetTooltip("Log in first");
             }
         }
 
         ImGui.Spacing();
+        ImGui.Spacing();
 
-        // ── BGM cache ────────────────────────────────────────────────────────
+        // ── BGM Cache ────────────────────────────────────────────────────────
         ImGui.TextUnformatted("BGM Cache");
         ImGui.Separator();
 
         long bytes = plugin.BgmService.GetCacheSizeBytes();
         string sizeStr = bytes switch
         {
-            < 1024              => $"{bytes} B",
-            < 1024 * 1024       => $"{bytes / 1024.0:F1} KB",
+            < 1024                => $"{bytes} B",
+            < 1024 * 1024         => $"{bytes / 1024.0:F1} KB",
             < 1024L * 1024 * 1024 => $"{bytes / (1024.0 * 1024):F1} MB",
-            _                   => $"{bytes / (1024.0 * 1024 * 1024):F2} GB",
+            _                     => $"{bytes / (1024.0 * 1024 * 1024):F2} GB",
         };
 
         ImGui.TextDisabled($"Cached audio: {sizeStr}");

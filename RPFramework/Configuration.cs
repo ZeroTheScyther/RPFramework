@@ -22,5 +22,11 @@ public class Configuration : IPluginConfiguration
     // Per-character RPG stats, keyed by "Name@World"
     public Dictionary<string, RpCharacter> Characters { get; set; } = new();
 
+    // Parties — persisted for offline display; member lists are live from server
+    public List<RpParty> Parties { get; set; } = new();
+
+    // Fellow Adventurers — 1:1 individual sync pairs, stored as "Name@World" IDs
+    public List<string> FellowAdventurers { get; set; } = new();
+
     public void Save() => Plugin.PluginInterface.SavePluginConfig(this);
 }
