@@ -42,6 +42,7 @@ public sealed class Plugin : IDalamudPlugin
     private const string CmdDice        = "/rpdice";
     private const string CmdSkills      = "/rpskills";
     private const string CmdSkillsShort = "/rpsk";
+    private const string CmdHelp        = "/rphelp";
     private const string DefaultServerUrl = "https://rpframework.example.com";
 
     public Configuration   Configuration { get; init; }
@@ -58,6 +59,9 @@ public sealed class Plugin : IDalamudPlugin
 
     /// <summary>Active initiative states, keyed by party code.</summary>
     public readonly Dictionary<string, InitiativeStateDto> InitiativeStates = new();
+
+    /// <summary>Per-party ShowHpAp preference — persists before, during, and between initiative rounds.</summary>
+    public readonly Dictionary<string, bool> PartyInitiativeShowHpAp = new();
 
     private bool _autoConnectPending;
 
@@ -79,6 +83,7 @@ public sealed class Plugin : IDalamudPlugin
     private CharacterSheetWindow    CharacterSheetWindow    { get; init; }
     private DiceRollerWindow        DiceRollerWindow        { get; init; }
     private SkillsWindow            SkillsWindow            { get; init; }
+    private HelpWindow              HelpWindow              { get; init; }
     public  BgmService              BgmService              { get; init; }
     public  NetworkService          Network                 { get; init; }
 
@@ -103,6 +108,7 @@ public sealed class Plugin : IDalamudPlugin
         CharacterSheetWindow    = new CharacterSheetWindow(this);
         DiceRollerWindow        = new DiceRollerWindow(this);
         SkillsWindow            = new SkillsWindow(this);
+        HelpWindow              = new HelpWindow();
 
         WindowSystem.AddWindow(HubWindow);
         WindowSystem.AddWindow(InitiativeWindow);
@@ -115,6 +121,7 @@ public sealed class Plugin : IDalamudPlugin
         WindowSystem.AddWindow(CharacterSheetWindow);
         WindowSystem.AddWindow(DiceRollerWindow);
         WindowSystem.AddWindow(SkillsWindow);
+        WindowSystem.AddWindow(HelpWindow);
 
         // Wire up network events
         Network.Connected              += OnConnected;
@@ -131,15 +138,20 @@ public sealed class Plugin : IDalamudPlugin
         Network.ProfileReceived        += OnProfileReceived;
         Network.ProfileFetchFailed     += OnProfileFetchFailed;
         Network.PartyInfoReceived      += OnPartyInfoReceived;
-        Network.PartyMemberJoined      += OnPartyMemberJoined;
-        Network.PartyMemberLeft        += OnPartyMemberLeft;
-        Network.PartyDisbanded         += OnPartyDisbanded;
+        Network.PartyMemberJoined        += OnPartyMemberJoined;
+        Network.PartyMemberLeft          += OnPartyMemberLeft;
+        Network.PartyMemberDisconnected  += OnPartyMemberDisconnected;
+        Network.PartyDisbanded           += OnPartyDisbanded;
         Network.PartyMemberBgmChanged  += OnPartyMemberBgmChanged;
         Network.PartyMemberRoleChanged += OnPartyMemberRoleChanged;
         Network.BgmRoomDeleted         += OnBgmRoomDeleted;
-        Network.PartyInitiativeStarted += OnPartyInitiativeStarted;
-        Network.PartyInitiativeUpdated += OnPartyInitiativeUpdated;
-        Network.PartyInitiativeEnded   += OnPartyInitiativeEnded;
+        Network.PartyInitiativeStarted        += OnPartyInitiativeStarted;
+        Network.PartyInitiativeUpdated        += OnPartyInitiativeUpdated;
+        Network.PartyInitiativeEnded          += OnPartyInitiativeEnded;
+        Network.PartyInitiativeShowHpApChanged += OnPartyInitiativeShowHpApChanged;
+        Network.PartySheetTemplateReceived     += OnSheetTemplateReceived;
+
+        MigrateCharacters();
 
         ContextMenu.OnMenuOpened += OnContextMenuOpened;
 
@@ -155,6 +167,7 @@ public sealed class Plugin : IDalamudPlugin
         CommandManager.AddHandler(CmdSkills,         new CommandInfo(OnSkillsCmd)    { HelpMessage = "Opens the RP Skills & Passives window" });
         CommandManager.AddHandler(CmdSkillsShort,    new CommandInfo(OnSkillsCmd)    { HelpMessage = "Opens the RP Skills & Passives window" });
         CommandManager.AddHandler(CmdIni,            new CommandInfo(OnIniCmd)       { HelpMessage = "Opens the RP Initiative tracker" });
+        CommandManager.AddHandler(CmdHelp,           new CommandInfo(OnHelpCmd)      { HelpMessage = "Opens the RPFramework help window" });
 
         PluginInterface.UiBuilder.Draw         += WindowSystem.Draw;
         PluginInterface.UiBuilder.OpenMainUi   += HubWindow.Toggle;
@@ -182,15 +195,18 @@ public sealed class Plugin : IDalamudPlugin
         Network.ProfileReceived        -= OnProfileReceived;
         Network.ProfileFetchFailed     -= OnProfileFetchFailed;
         Network.PartyInfoReceived      -= OnPartyInfoReceived;
-        Network.PartyMemberJoined      -= OnPartyMemberJoined;
-        Network.PartyMemberLeft        -= OnPartyMemberLeft;
-        Network.PartyDisbanded         -= OnPartyDisbanded;
+        Network.PartyMemberJoined        -= OnPartyMemberJoined;
+        Network.PartyMemberLeft          -= OnPartyMemberLeft;
+        Network.PartyMemberDisconnected  -= OnPartyMemberDisconnected;
+        Network.PartyDisbanded           -= OnPartyDisbanded;
         Network.PartyMemberBgmChanged  -= OnPartyMemberBgmChanged;
         Network.PartyMemberRoleChanged -= OnPartyMemberRoleChanged;
         Network.BgmRoomDeleted         -= OnBgmRoomDeleted;
-        Network.PartyInitiativeStarted -= OnPartyInitiativeStarted;
-        Network.PartyInitiativeUpdated -= OnPartyInitiativeUpdated;
-        Network.PartyInitiativeEnded   -= OnPartyInitiativeEnded;
+        Network.PartyInitiativeStarted         -= OnPartyInitiativeStarted;
+        Network.PartyInitiativeUpdated         -= OnPartyInitiativeUpdated;
+        Network.PartyInitiativeEnded           -= OnPartyInitiativeEnded;
+        Network.PartyInitiativeShowHpApChanged -= OnPartyInitiativeShowHpApChanged;
+        Network.PartySheetTemplateReceived     -= OnSheetTemplateReceived;
 
         ContextMenu.OnMenuOpened -= OnContextMenuOpened;
 
@@ -230,6 +246,7 @@ public sealed class Plugin : IDalamudPlugin
         CommandManager.RemoveHandler(CmdSkills);
         CommandManager.RemoveHandler(CmdSkillsShort);
         CommandManager.RemoveHandler(CmdIni);
+        CommandManager.RemoveHandler(CmdHelp);
     }
 
     private void OnFrameworkUpdate(IFramework framework)
@@ -283,7 +300,8 @@ public sealed class Plugin : IDalamudPlugin
             OpenPlayerSkills(target, ParseDisplayName(target));
     }
 
-    private void OnIniCmd(string command, string args) => InitiativeWindow.Toggle();
+    private void OnIniCmd(string command, string args)  => InitiativeWindow.Toggle();
+    private void OnHelpCmd(string command, string args) => HelpWindow.Toggle();
 
     private void OnDiceCmd(string command, string args)
     {
@@ -454,6 +472,9 @@ public sealed class Plugin : IDalamudPlugin
         // Refresh in-memory member list
         PartyMembers[info.Code] = info.Members.ToList();
 
+        // Seed ShowHpAp setting for this party (only if not already set locally)
+        PartyInitiativeShowHpAp.TryAdd(info.Code, info.ShowHpAp);
+
         // Fetch profiles of online party members we don't have yet
         foreach (var member in info.Members)
         {
@@ -481,6 +502,13 @@ public sealed class Plugin : IDalamudPlugin
     {
         if (PartyMembers.TryGetValue(code, out var list))
             list.RemoveAll(m => m.PlayerId == playerId);
+        KnownOnlinePlayers.Remove(playerId);
+    }
+
+    private void OnPartyMemberDisconnected(string code, string playerId)
+    {
+        // Keep the member in the list so they show as greyed-out; just mark offline.
+        KnownOnlinePlayers.Remove(playerId);
     }
 
     private void OnPartyDisbanded(string code)
@@ -567,18 +595,27 @@ public sealed class Plugin : IDalamudPlugin
         string? pid = LocalPlayerId;
         if (pid == null) return;
 
-        // Auto-roll d24 + SPD bonus and submit
-        var ch      = GetOrCreateCharacter(pid);
-        int roll     = new Random().Next(1, 25);          // d24: 1–24
-        int spdBonus = SkillHelpers.StatMod(ch.Spd);     // floor((SPD-10)/2), e.g. 20→+5, 10→+0
-        Task.Run(() => Network.PartySubmitRollAsync(code, roll, spdBonus));
+        var ch        = GetOrCreateCharacter(pid);
+        var template  = Configuration.ActiveTemplate;
+        int initBonus = GetInitiativeBonus(ch, template);
+        int roll      = new Random().Next(1, 25);
+        Task.Run(() => Network.PartySubmitRollAsync(code, roll, initBonus));
 
         InitiativeWindow.IsOpen = true;
+    }
+
+    public int GetInitiativeBonus(RpCharacter ch, SheetTemplate template)
+    {
+        var initField = template.FindInitiativeStat();
+        if (initField == null) return 0;
+        ch.StatValues.TryGetValue(initField.Id, out int raw);
+        return SkillHelpers.StatMod(raw + SkillHelpers.PassiveStatAdjust(ch, initField.Id, template));
     }
 
     private void OnPartyInitiativeUpdated(string code, InitiativeStateDto state)
     {
         InitiativeStates[code] = state;
+        PartyInitiativeShowHpAp[code] = state.ShowHpAp;
         InitiativeWindow.IsOpen = true;
     }
 
@@ -586,6 +623,11 @@ public sealed class Plugin : IDalamudPlugin
     {
         InitiativeStates.Remove(code);
         // Leave the window open so players can see the result; they close it manually
+    }
+
+    private void OnPartyInitiativeShowHpApChanged(string code, bool show)
+    {
+        PartyInitiativeShowHpAp[code] = show;
     }
 
     // ── Shared bags public helper ─────────────────────────────────────────────
@@ -638,10 +680,55 @@ public sealed class Plugin : IDalamudPlugin
             s.Conditions, s.Effects)).ToList();
         return new CharacterProfileDto(
             pid, displayName,
-            ch.HpCurrent, ch.HpMax, ch.ApCurrent, ch.ApMax,
-            ch.Str, ch.Dex, ch.Spd, ch.Con,
-            ch.Mem, ch.Mtl, ch.Int, ch.Cha,
-            ch.Proficiencies, skills);
+            new Dictionary<string, int>(ch.StatValues),
+            new Dictionary<string, bool>(ch.CheckValues),
+            skills);
+    }
+
+    private void MigrateCharacters()
+    {
+        bool dirty = false;
+        foreach (var (_, ch) in Configuration.Characters)
+        {
+            if (ch.SheetMigrated) continue;
+
+            ch.StatValues[WellKnownIds.Str] = ch.Str;
+            ch.StatValues[WellKnownIds.Dex] = ch.Dex;
+            ch.StatValues[WellKnownIds.Spd] = ch.Spd;
+            ch.StatValues[WellKnownIds.Con] = ch.Con;
+            ch.StatValues[WellKnownIds.Mem] = ch.Mem;
+            ch.StatValues[WellKnownIds.Mtl] = ch.Mtl;
+            ch.StatValues[WellKnownIds.Int] = ch.Int;
+            ch.StatValues[WellKnownIds.Cha] = ch.Cha;
+
+            ch.StatValues[WellKnownIds.Hp + ":cur"] = ch.HpCurrent;
+            ch.StatValues[WellKnownIds.Hp + ":max"] = ch.HpMax;
+            ch.StatValues[WellKnownIds.Ap + ":cur"] = ch.ApCurrent;
+            ch.StatValues[WellKnownIds.Ap + ":max"] = ch.ApMax;
+
+            foreach (var (specName, val) in ch.Proficiencies)
+                ch.CheckValues[WellKnownIds.SpecId(specName)] = val;
+
+            foreach (var skill in ch.Skills)
+            {
+                foreach (var cond in skill.Conditions)
+                    if (string.IsNullOrEmpty(cond.FieldId))
+                        cond.FieldId = SkillHelpers.LegacyStatId(cond.Stat);
+                foreach (var fx in skill.Effects)
+                    if (string.IsNullOrEmpty(fx.FieldId))
+                        fx.FieldId = SkillHelpers.LegacyStatId(fx.Target);
+            }
+
+            ch.SheetMigrated = true;
+            dirty = true;
+        }
+        if (dirty) Configuration.Save();
+    }
+
+    private void OnSheetTemplateReceived(string partyCode, SheetTemplate template)
+    {
+        Configuration.ActiveTemplate = template;
+        Configuration.Save();
     }
 
     public void PushLocalProfile()
@@ -693,7 +780,7 @@ public sealed class Plugin : IDalamudPlugin
         }
         else if (openSheet)
         {
-            var win = new PlayerSheetWindow(profile, ClosePlayerSheetWindow);
+            var win = new PlayerSheetWindow(this, profile, ClosePlayerSheetWindow);
             _playerSheetWindows[pid] = win;
             WindowSystem.AddWindow(win);
             win.IsOpen = true;
@@ -706,7 +793,7 @@ public sealed class Plugin : IDalamudPlugin
         }
         else if (openSkills)
         {
-            var win = new PlayerSkillsWindow(profile, ClosePlayerSkillsWindow);
+            var win = new PlayerSkillsWindow(this, profile, ClosePlayerSkillsWindow);
             _playerSkillsWindows[pid] = win;
             WindowSystem.AddWindow(win);
             win.IsOpen = true;

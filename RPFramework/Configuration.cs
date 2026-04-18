@@ -28,5 +28,26 @@ public class Configuration : IPluginConfiguration
     // Fellow Adventurers — 1:1 individual sync pairs, stored as "Name@World" IDs
     public List<string> FellowAdventurers { get; set; } = new();
 
+    // Active sheet template — shared with party members when published by a DM.
+    // Newtonsoft.Json is the actual serializer (Dalamud config); use its attributes.
+    [Newtonsoft.Json.JsonIgnore]
+    public SheetTemplate ActiveTemplate
+    {
+        get => _activeTemplate ??= SheetTemplate.Default();
+        set => _activeTemplate = value;
+    }
+
+    // Newtonsoft serializes this as "ActiveTemplateSerialized". On deserialization
+    // the getter returns null (backing field not yet set), so Newtonsoft creates a
+    // fresh SheetTemplate from JSON rather than merging into a pre-populated Default().
+    public SheetTemplate? ActiveTemplateSerialized
+    {
+        get => _activeTemplate;
+        set => _activeTemplate = value;
+    }
+
+    [Newtonsoft.Json.JsonIgnore]
+    private SheetTemplate? _activeTemplate;
+
     public void Save() => Plugin.PluginInterface.SavePluginConfig(this);
 }

@@ -97,23 +97,24 @@ public record RpSkillDto(
 public record CharacterProfileDto(
     string                   PlayerId,
     string                   DisplayName,
-    int                      HpCurrent, int HpMax,
-    int                      ApCurrent, int ApMax,
-    int                      Str, int Dex, int Spd, int Con,
-    int                      Mem, int Mtl, int Int, int Cha,
-    Dictionary<string, bool> Proficiencies,
+    Dictionary<string, int>  StatValues,
+    Dictionary<string, bool> CheckValues,
     List<RpSkillDto>         Skills
 );
 
+/// <summary>Sheet template broadcast from a DM to their party members.</summary>
+public record SheetTemplateDto(string PartyCode, SheetTemplate Template);
+
 // ── Initiative ────────────────────────────────────────────────────────────────
 
-public record InitiativeEntryDto(string PlayerId, string DisplayName, int Roll, int SpdBonus, int Total);
+public record InitiativeEntryDto(string PlayerId, string DisplayName, int Roll, int SpdBonus, int Total, int HpCurrent, int HpMax, int ApCurrent, int ApMax);
 
 public record InitiativeStateDto(
     string                   PartyCode,
     List<InitiativeEntryDto> Order,
     int                      CurrentIndex,
-    bool                     IsActive
+    bool                     IsActive,
+    bool                     ShowHpAp = true
 );
 
 // ── Parties ───────────────────────────────────────────────────────────────────
@@ -131,5 +132,6 @@ public record PartyInfoDto(
     string               Code,
     string               Name,
     string               OwnerPlayerId,
-    List<PartyMemberDto> Members
+    List<PartyMemberDto> Members,
+    bool                 ShowHpAp = true
 );

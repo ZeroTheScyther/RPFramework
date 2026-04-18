@@ -4,6 +4,7 @@ using System.Linq;
 using System.Numerics;
 using System.Threading.Tasks;
 using Dalamud.Bindings.ImGui;
+using Dalamud.Interface;
 using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
 using Dalamud.Interface.Windowing;
@@ -15,7 +16,8 @@ namespace RPFramework.Windows;
 public class InitiativeWindow : Window, IDisposable
 {
     private readonly Plugin _plugin;
-    private string? _partyCode; // which party's initiative is currently displayed
+    private string? _partyCode;    // which party's initiative is currently displayed
+    private bool    _showSettings; // whether the settings panel is open
 
     public InitiativeWindow(Plugin plugin)
         : base("RP Initiative##RPFramework.Initiative",
@@ -24,11 +26,18 @@ public class InitiativeWindow : Window, IDisposable
         _plugin = plugin;
         SizeConstraints = new WindowSizeConstraints
         {
-            MinimumSize = new Vector2(340, 200),
-            MaximumSize = new Vector2(640, 700),
+            MinimumSize = new Vector2(500, 200),
+            MaximumSize = new Vector2(800, 700),
         };
-        Size          = new Vector2(380, 320);
+        Size          = new Vector2(560, 320);
         SizeCondition = ImGuiCond.FirstUseEver;
+
+        TitleBarButtons.Add(new TitleBarButton
+        {
+            Icon        = FontAwesomeIcon.Cog,
+            ShowTooltip = () => ImGui.SetTooltip("Initiative settings"),
+            Click       = _ => _showSettings = !_showSettings,
+        });
     }
 
     public void Dispose() { }
@@ -45,14 +54,25 @@ public class InitiativeWindow : Window, IDisposable
         var states      = _plugin.InitiativeStates;
         var activeCodes = states.Keys.ToList();
 
-        // Pick a valid displayed party
-        if (_partyCode == null || !activeCodes.Contains(_partyCode))
+        // Pick a valid displayed party — prefer active initiative, then fall back to any joined party
+        if (_partyCode == null || (!activeCodes.Contains(_partyCode) && activeCodes.Count > 0))
             _partyCode = activeCodes.FirstOrDefault();
+        if (_partyCode == null)
+            _partyCode = _plugin.Configuration.Parties.FirstOrDefault()?.Code;
 
-        if (_partyCode == null || !states.TryGetValue(_partyCode, out var state))
+        // Determine DM status once, here, for use in both settings panel and active view
+        bool isDmOrCoDm = false;
+        if (_partyCode != null && _plugin.PartyMembers.TryGetValue(_partyCode, out var roleMembers))
         {
-            DrawNoInitiativeView(pid);
-            return;
+            var me = roleMembers.FirstOrDefault(m => m.PlayerId == pid);
+            isDmOrCoDm = me?.Role is PartyRole.Owner or PartyRole.CoDm;
+        }
+
+        // Settings panel — always shown when open, regardless of initiative state
+        if (_showSettings && _partyCode != null)
+        {
+            DrawSettingsPanel(_partyCode, isDmOrCoDm);
+            ImGui.Separator();
         }
 
         // If the player is in multiple parties that each have active initiative, show a dropdown
@@ -64,7 +84,7 @@ public class InitiativeWindow : Window, IDisposable
             {
                 foreach (var code in activeCodes)
                 {
-                    var p   = _plugin.Configuration.Parties.Find(x => x.Code == code);
+                    var p      = _plugin.Configuration.Parties.Find(x => x.Code == code);
                     string lbl = p?.Name ?? code;
                     if (ImGui.Selectable($"{lbl}##ini_pick_{code}", code == _partyCode))
                         _partyCode = code;
@@ -73,15 +93,15 @@ public class InitiativeWindow : Window, IDisposable
                 }
                 ImGui.EndCombo();
             }
-            // Re-fetch in case dropdown changed _partyCode
-            if (!states.TryGetValue(_partyCode, out state))
-            {
-                DrawNoInitiativeView(pid);
-                return;
-            }
         }
 
-        DrawActiveInitiative(pid, state);
+        if (_partyCode == null || !states.TryGetValue(_partyCode, out var state))
+        {
+            DrawNoInitiativeView(pid);
+            return;
+        }
+
+        DrawActiveInitiative(pid, state, isDmOrCoDm);
     }
 
     // ── No active initiative ──────────────────────────────────────────────────
@@ -114,19 +134,40 @@ public class InitiativeWindow : Window, IDisposable
             ImGui.TextDisabled("Waiting for your DM to start initiative…");
     }
 
-    // ── Active initiative ─────────────────────────────────────────────────────
+    // ── Settings panel ────────────────────────────────────────────────────────
 
-    private void DrawActiveInitiative(string pid, InitiativeStateDto state)
+    private void DrawSettingsPanel(string partyCode, bool isDmOrCoDm)
     {
         float scale = ImGuiHelpers.GlobalScale;
+        ImGuiHelpers.ScaledDummy(2f);
+        using var indent = ImRaii.PushIndent(4f * scale, false);
 
-        // Determine local player's role in this party
-        bool isDmOrCoDm = false;
-        if (_plugin.PartyMembers.TryGetValue(state.PartyCode, out var members))
+        ImGui.TextDisabled("Settings");
+        ImGuiHelpers.ScaledDummy(2f);
+
+        bool showHpAp = _plugin.PartyInitiativeShowHpAp.GetValueOrDefault(partyCode, true);
+        if (!isDmOrCoDm) ImGui.BeginDisabled();
+        if (ImGui.Checkbox("Show HP / AP##ini_showhpap", ref showHpAp) && isDmOrCoDm)
         {
-            var me = members.FirstOrDefault(m => m.PlayerId == pid);
-            isDmOrCoDm = me?.Role is PartyRole.Owner or PartyRole.CoDm;
+            // Optimistic local update — avoids the checkbox reverting while the round-trip completes
+            _plugin.PartyInitiativeShowHpAp[partyCode] = showHpAp;
+            Task.Run(() => _plugin.Network.PartySetInitiativeShowHpApAsync(partyCode, showHpAp));
         }
+        if (!isDmOrCoDm)
+        {
+            ImGui.EndDisabled();
+            if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+                ImGui.SetTooltip("Only the DM can change this setting.");
+        }
+
+        ImGuiHelpers.ScaledDummy(2f);
+    }
+
+    // ── Active initiative ─────────────────────────────────────────────────────
+
+    private void DrawActiveInitiative(string pid, InitiativeStateDto state, bool isDmOrCoDm)
+    {
+        float scale = ImGuiHelpers.GlobalScale;
 
         // Is it the local player's turn right now?
         int safeIdx   = state.Order.Count > 0
@@ -162,54 +203,115 @@ public class InitiativeWindow : Window, IDisposable
                 {
                     ImGui.TextDisabled("Waiting for rolls…");
                 }
-                else if (ImGui.BeginTable("##ini_t", 3,
-                    ImGuiTableFlags.SizingFixedFit | ImGuiTableFlags.PadOuterX))
+                else
                 {
-                    ImGui.TableSetupColumn("##ini_c0", ImGuiTableColumnFlags.WidthFixed,   24 * scale);
-                    ImGui.TableSetupColumn("##ini_c1", ImGuiTableColumnFlags.WidthStretch, 1f);
-                    ImGui.TableSetupColumn("##ini_c2", ImGuiTableColumnFlags.WidthFixed,  112 * scale);
+                    bool showHpAp = _plugin.PartyInitiativeShowHpAp.GetValueOrDefault(state.PartyCode, true);
+                    int  colCount = showHpAp ? 5 : 3;
 
-                    for (int i = 0; i < state.Order.Count; i++)
+                    if (ImGui.BeginTable("##ini_t", colCount,
+                        ImGuiTableFlags.SizingFixedFit | ImGuiTableFlags.PadOuterX))
                     {
-                        var  entry     = state.Order[i];
-                        bool isCurrent = i == safeIdx;
-                        bool isMe      = entry.PlayerId == pid;
-
-                        ImGui.TableNextRow();
-
-                        if (isCurrent)
+                        ImGui.TableSetupColumn("##ini_c0", ImGuiTableColumnFlags.WidthFixed,   24 * scale);
+                        ImGui.TableSetupColumn("##ini_c1", ImGuiTableColumnFlags.WidthStretch, 1f);
+                        if (showHpAp)
                         {
-                            uint rowColor = ImGui.ColorConvertFloat4ToU32(
-                                new Vector4(0.25f, 0.45f, 0.65f, 0.30f));
-                            ImGui.TableSetBgColor(ImGuiTableBgTarget.RowBg0, rowColor);
+                            ImGui.TableSetupColumn("##ini_c2", ImGuiTableColumnFlags.WidthFixed, 56 * scale);
+                            ImGui.TableSetupColumn("##ini_c3", ImGuiTableColumnFlags.WidthFixed, 56 * scale);
+                        }
+                        ImGui.TableSetupColumn("##ini_c4", ImGuiTableColumnFlags.WidthFixed, 80 * scale);
+
+                        var drawList = ImGui.GetWindowDrawList();
+
+                        for (int i = 0; i < state.Order.Count; i++)
+                        {
+                            var  entry     = state.Order[i];
+                            bool isCurrent = i == safeIdx;
+                            bool isMe      = entry.PlayerId == pid;
+                            bool incapacitated = (entry.HpMax > 0 && entry.HpCurrent <= 0)
+                                          || (entry.ApMax > 0 && entry.ApCurrent <= 0);
+
+                            ImGui.TableNextRow();
+
+                            if (isCurrent)
+                            {
+                                uint rowColor = ImGui.ColorConvertFloat4ToU32(
+                                    new Vector4(0.25f, 0.45f, 0.65f, 0.30f));
+                                ImGui.TableSetBgColor(ImGuiTableBgTarget.RowBg0, rowColor);
+                            }
+
+                            // Column 0: turn indicator / rank
+                            ImGui.TableSetColumnIndex(0);
+                            if (isCurrent)
+                                ImGui.TextColored(new Vector4(1f, 0.85f, 0.1f, 1f), "▶");
+                            else
+                                ImGui.TextDisabled($"{i + 1}.");
+
+                            // Column 1: display name (with optional strikethrough)
+                            ImGui.TableSetColumnIndex(1);
+                            var nameColor = incapacitated
+                                ? new Vector4(0.55f, 0.55f, 0.55f, 1f)
+                                : isCurrent
+                                    ? new Vector4(1f, 1f, 1f, 1f)
+                                    : new Vector4(0.60f, 0.60f, 0.60f, 1f);
+                            ImGui.TextColored(nameColor, entry.DisplayName);
+                            if (incapacitated)
+                            {
+                                var rMin = ImGui.GetItemRectMin();
+                                var rMax = ImGui.GetItemRectMax();
+                                float midY = (rMin.Y + rMax.Y) * 0.5f;
+                                drawList.AddLine(
+                                    new Vector2(rMin.X, midY),
+                                    new Vector2(rMax.X, midY),
+                                    ImGui.ColorConvertFloat4ToU32(new Vector4(0.80f, 0.20f, 0.20f, 0.85f)),
+                                    1.5f * scale);
+                            }
+
+                            if (showHpAp)
+                            {
+                                // Column 2: HP
+                                ImGui.TableSetColumnIndex(2);
+                                if (entry.HpMax > 0)
+                                {
+                                    bool hpZero = entry.HpCurrent <= 0;
+                                    var hpColor = hpZero
+                                        ? new Vector4(0.80f, 0.20f, 0.20f, 1f)
+                                        : new Vector4(0.30f, 0.80f, 0.30f, 1f);
+                                    ImGui.TextColored(hpColor, $"HP {entry.HpCurrent}/{entry.HpMax}");
+                                }
+                                else
+                                {
+                                    ImGui.TextDisabled("—");
+                                }
+
+                                // Column 3: AP
+                                ImGui.TableSetColumnIndex(3);
+                                if (entry.ApMax > 0)
+                                {
+                                    bool apZero = entry.ApCurrent <= 0;
+                                    var apColor = apZero
+                                        ? new Vector4(0.80f, 0.20f, 0.20f, 1f)
+                                        : new Vector4(0.30f, 0.55f, 0.90f, 1f);
+                                    ImGui.TextColored(apColor, $"AP {entry.ApCurrent}/{entry.ApMax}");
+                                }
+                                else
+                                {
+                                    ImGui.TextDisabled("—");
+                                }
+                            }
+
+                            // Last column: roll score (index shifts when HP/AP hidden)
+                            ImGui.TableSetColumnIndex(showHpAp ? 4 : 2);
+                            string rollStr = entry.SpdBonus > 0
+                                ? $"{entry.Total} ({entry.Roll}+{entry.SpdBonus})"
+                                : $"{entry.Total}";
+                            if (isCurrent && isMe)
+                                ImGui.TextUnformatted(rollStr);
+                            else
+                                ImGui.TextDisabled(rollStr);
                         }
 
-                        // Column 0: turn indicator / rank
-                        ImGui.TableSetColumnIndex(0);
-                        if (isCurrent)
-                            ImGui.TextColored(new Vector4(1f, 0.85f, 0.1f, 1f), "▶");
-                        else
-                            ImGui.TextDisabled($"{i + 1}.");
-
-                        // Column 1: display name
-                        ImGui.TableSetColumnIndex(1);
-                        if (isCurrent)
-                            ImGui.TextUnformatted(entry.DisplayName);
-                        else
-                            ImGui.TextDisabled(entry.DisplayName);
-
-                        // Column 2: roll score
-                        ImGui.TableSetColumnIndex(2);
-                        string rollStr = entry.SpdBonus > 0
-                            ? $"{entry.Total} ({entry.Roll}+{entry.SpdBonus})"
-                            : $"{entry.Total}";
-                        if (isCurrent && isMe)
-                            ImGui.TextUnformatted(rollStr);
-                        else
-                            ImGui.TextDisabled(rollStr);
+                        ImGui.EndTable();
                     }
-
-                    ImGui.EndTable();
                 }
             }
         }
@@ -234,10 +336,12 @@ public class InitiativeWindow : Window, IDisposable
                         if (s.CooldownRemaining  > 0) { s.CooldownRemaining--;  dirty = true; }
                         if (s.DurationRemaining > 0) { s.DurationRemaining--; dirty = true; }
 
-                        // Fire any "Trigger on Turn End" passive effects
-                        if (s.Type == SkillType.Passive && s.TriggerOnTurnEnd && s.CooldownRemaining == 0)
+                        // Fire any "Trigger on Turn End" passive effects (respects conditions)
+                        var tmpl = _plugin.Configuration.ActiveTemplate;
+                        if (s.Type == SkillType.Passive && s.TriggerOnTurnEnd && s.CooldownRemaining == 0
+                            && SkillHelpers.ConditionsMet(s, ch, tmpl))
                         {
-                            SkillHelpers.ApplyEffects(s, ch);
+                            SkillHelpers.ApplyEffects(s, ch, tmpl);
                             dirty = true;
                         }
                     }

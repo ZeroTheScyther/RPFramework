@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Utility;
@@ -19,35 +20,7 @@ public class DiceRollerWindow : Window, IDisposable
     private int    _advantageMode   = 0;   // 0=Normal, 1=Advantage, 2=Disadvantage
     private readonly List<string> _history = new();
 
-    private static readonly int[]    DieSizes  = { 4, 6, 8, 10, 12, 20, 100 };
-    private static readonly string[] StatNames = { "None", "STR", "DEX", "SPD", "CON", "MEM", "MTL", "INT", "CHA" };
-    private static readonly SkillStat[] StatMapping =
-    {
-        SkillStat.Str, // idx 1
-        SkillStat.Dex, // idx 2
-        SkillStat.Spd, // idx 3
-        SkillStat.Con, // idx 4
-        SkillStat.Mem, // idx 5
-        SkillStat.Mtl, // idx 6
-        SkillStat.Int, // idx 7
-        SkillStat.Cha, // idx 8
-    };
-    private static readonly string[] Specializations =
-    [
-        "Acrobatics", "Animal Handling", "Thaumaturgy", "Arcanima", "Conjury",
-        "History", "Insight", "Aetherology", "Intimidation", "Investigation",
-        "Medicine", "Herbalism", "Perception", "Performance", "Persuasion",
-        "Religion", "Sleight of Hand", "Bartering", "Stealth", "Deception",
-        "Streetwise", "Hobnobbing", "Survival",
-    ];
-    private static readonly string[] SpecOptions;
-
-    static DiceRollerWindow()
-    {
-        SpecOptions = new string[Specializations.Length + 1];
-        SpecOptions[0] = "None";
-        Array.Copy(Specializations, 0, SpecOptions, 1, Specializations.Length);
-    }
+    private static readonly int[] DieSizes = { 4, 6, 8, 10, 12, 20, 100 };
 
     public DiceRollerWindow(Plugin plugin)
         : base("RP Dice Roller##RPFramework.Dice",
@@ -71,25 +44,41 @@ public class DiceRollerWindow : Window, IDisposable
         RpCharacter? ch = pid != null ? plugin.GetOrCreateCharacter(pid) : null;
         float scale = ImGuiHelpers.GlobalScale;
 
+        var template     = plugin.Configuration.ActiveTemplate;
+        var numberFields = template.Groups.SelectMany(g => g.Fields)
+                                          .Where(f => f.Type == FieldType.Number)
+                                          .ToList();
+        var checkFields  = template.Groups.SelectMany(g => g.Fields)
+                                          .Where(f => f.Type == FieldType.Checkbox)
+                                          .ToList();
+
+        var statOptions = new string[numberFields.Count + 1];
+        statOptions[0] = "None";
+        for (int i = 0; i < numberFields.Count; i++) statOptions[i + 1] = numberFields[i].Name;
+
+        var specOptions = new string[checkFields.Count + 1];
+        specOptions[0] = "None";
+        for (int i = 0; i < checkFields.Count; i++) specOptions[i + 1] = checkFields[i].Name;
+
+        // Clamp indices after template changes
+        if (_statModifierIdx >= statOptions.Length) _statModifierIdx = 0;
+        if (_specIdx         >= specOptions.Length) _specIdx         = 0;
+
         // ── Die buttons ───────────────────────────────────────────────────────
         var highlightColor = new Vector4(0.26f, 0.59f, 0.98f, 1f);
 
         foreach (int die in DieSizes)
         {
             bool selected = _selectedDie == die;
-            if (selected)
-                ImGui.PushStyleColor(ImGuiCol.Button, highlightColor);
+            if (selected) ImGui.PushStyleColor(ImGuiCol.Button, highlightColor);
 
             if (ImGui.Button($"d{die}##rpdie_{die}"))
                 _selectedDie = die;
 
-            if (selected)
-                ImGui.PopStyleColor();
-
+            if (selected) ImGui.PopStyleColor();
             ImGui.SameLine();
         }
 
-        // Custom die input
         ImGui.SetNextItemWidth(56 * scale);
         if (ImGui.InputInt("##rpdiecustom", ref _selectedDie, 0, 0))
             _selectedDie = Math.Clamp(_selectedDie, 1, 9999);
@@ -100,16 +89,16 @@ public class DiceRollerWindow : Window, IDisposable
         // ── Stat modifier ─────────────────────────────────────────────────────
         ImGui.TextUnformatted("Stat Modifier");
         ImGui.SetNextItemWidth(120 * scale);
-        ImGui.Combo("##rpstatmod", ref _statModifierIdx, StatNames, StatNames.Length);
+        ImGui.Combo("##rpstatmod", ref _statModifierIdx, statOptions, statOptions.Length);
 
         if (_statModifierIdx > 0 && ch != null)
         {
-            int modVal = GetStatValue(ch, _statModifierIdx);
+            var selField = numberFields[_statModifierIdx - 1];
+            int modVal   = GetStatValue(ch, selField, template);
             ImGui.SameLine();
             ImGui.TextDisabled($"({(modVal >= 0 ? "+" : "")}{modVal})");
 
-            // AP exhaustion indicator
-            int apPen = SkillHelpers.ApPenalty(ch);
+            int apPen = SkillHelpers.ApPenalty(ch, template);
             if (apPen < 0)
             {
                 ImGui.SameLine();
@@ -121,40 +110,27 @@ public class DiceRollerWindow : Window, IDisposable
         ImGui.Spacing();
         ImGui.TextUnformatted("Specialization");
 
-        bool specDisabled = ch == null;
-        if (specDisabled)
-        {
-            using var _ = ImRaii.Disabled();
-            ImGui.SetNextItemWidth(160 * scale);
-            ImGui.Combo("##rpspecmod", ref _specIdx, SpecOptions, SpecOptions.Length);
-        }
-        else
-        {
-            ImGui.SetNextItemWidth(160 * scale);
-            ImGui.Combo("##rpspecmod", ref _specIdx, SpecOptions, SpecOptions.Length);
-        }
+        ImGui.SetNextItemWidth(160 * scale);
+        ImGui.Combo("##rpspecmod", ref _specIdx, specOptions, specOptions.Length);
 
         if (_specIdx > 0 && ch != null)
         {
-            string skillName = SpecOptions[_specIdx];
-            ch.Proficiencies.TryGetValue(skillName, out bool hasProficiency);
+            var specField = checkFields[_specIdx - 1];
+            ch.CheckValues.TryGetValue(specField.Id, out bool hasProficiency);
             ImGui.SameLine();
-            if (hasProficiency)
-                ImGui.TextDisabled("(proficient)");
-            else
-                ImGui.TextDisabled("(no proficiency)");
+            ImGui.TextDisabled(hasProficiency ? "(proficient)" : "(no proficiency)");
         }
 
         // ── Advantage mode ────────────────────────────────────────────────────
         ImGui.Spacing();
-        ImGui.RadioButton("Normal##rpadv",   ref _advantageMode, 0); ImGui.SameLine();
-        ImGui.RadioButton("Advantage##rpadv",    ref _advantageMode, 1); ImGui.SameLine();
-        ImGui.RadioButton("Disadvantage##rpadv", ref _advantageMode, 2);
+        ImGui.RadioButton("Normal##rpadv",        ref _advantageMode, 0); ImGui.SameLine();
+        ImGui.RadioButton("Advantage##rpadv",     ref _advantageMode, 1); ImGui.SameLine();
+        ImGui.RadioButton("Disadvantage##rpadv",  ref _advantageMode, 2);
 
         // ── Roll button ───────────────────────────────────────────────────────
         ImGui.Spacing();
         if (ImGui.Button($"Roll d{_selectedDie}##rproll", new Vector2(-1, 0)))
-            ExecuteRoll(ch);
+            ExecuteRoll(ch, numberFields, checkFields, template);
 
         // ── History ───────────────────────────────────────────────────────────
         ImGui.Spacing();
@@ -175,26 +151,36 @@ public class DiceRollerWindow : Window, IDisposable
             _selectedDie = n;
         string? pid = plugin.LocalPlayerId;
         var ch = pid != null ? plugin.GetOrCreateCharacter(pid) : null;
-        ExecuteRoll(ch);
+        var template     = plugin.Configuration.ActiveTemplate;
+        var numberFields = template.Groups.SelectMany(g => g.Fields)
+                                          .Where(f => f.Type == FieldType.Number).ToList();
+        var checkFields  = template.Groups.SelectMany(g => g.Fields)
+                                          .Where(f => f.Type == FieldType.Checkbox).ToList();
+        ExecuteRoll(ch, numberFields, checkFields, template);
     }
 
-    private void ExecuteRoll(RpCharacter? ch)
+    private void ExecuteRoll(RpCharacter? ch,
+                             List<SheetField> numberFields, List<SheetField> checkFields,
+                             SheetTemplate template)
     {
         int modVal = 0;
-        if (_statModifierIdx > 0 && ch != null)
-            modVal = GetStatValue(ch, _statModifierIdx);
-
-        bool hasProficiency = false;
-        string? specName = null;
-        if (_specIdx > 0 && ch != null)
+        string statName = "";
+        if (_statModifierIdx > 0 && ch != null && _statModifierIdx <= numberFields.Count)
         {
-            specName = SpecOptions[_specIdx];
-            ch.Proficiencies.TryGetValue(specName, out hasProficiency);
+            var selField = numberFields[_statModifierIdx - 1];
+            modVal   = GetStatValue(ch, selField, template);
+            statName = selField.Name;
         }
 
-        // Resolve effective roll mode
-        // Proficiency + Disadvantage cancels to single roll
-        // Proficiency alone = advantage
+        bool   hasProficiency = false;
+        string specName       = "";
+        if (_specIdx > 0 && ch != null && _specIdx <= checkFields.Count)
+        {
+            var specField = checkFields[_specIdx - 1];
+            ch.CheckValues.TryGetValue(specField.Id, out hasProficiency);
+            specName = specField.Name;
+        }
+
         bool rollTwice;
         bool keepHigher;
         string modeTag = "";
@@ -225,12 +211,10 @@ public class DiceRollerWindow : Window, IDisposable
             keepHigher = true;
         }
 
-        // Append AP exhaustion tag if active
         if (ch != null)
         {
-            int apPen = SkillHelpers.ApPenalty(ch);
-            if (apPen < 0)
-                modeTag += $" [AP {apPen}]";
+            int apPen = SkillHelpers.ApPenalty(ch, template);
+            if (apPen < 0) modeTag += $" [AP {apPen}]";
         }
 
         int r1 = RollDie(_selectedDie);
@@ -239,7 +223,7 @@ public class DiceRollerWindow : Window, IDisposable
 
         if (rollTwice)
         {
-            int r2 = RollDie(_selectedDie);
+            int r2   = RollDie(_selectedDie);
             rawRoll  = keepHigher ? Math.Max(r1, r2) : Math.Min(r1, r2);
             rollPart = $": {r1},{r2}→{rawRoll}";
         }
@@ -251,10 +235,10 @@ public class DiceRollerWindow : Window, IDisposable
 
         int total = rawRoll + modVal;
 
-        string modPart  = _statModifierIdx > 0
-                            ? $" + {StatNames[_statModifierIdx]}({(modVal >= 0 ? "+" : "")}{modVal})"
+        string modPart  = statName.Length > 0
+                            ? $" + {statName}({(modVal >= 0 ? "+" : "")}{modVal})"
                             : "";
-        string specPart = specName != null ? $" [{specName}]" : "";
+        string specPart = specName.Length > 0 ? $" [{specName}]" : "";
 
         string line = $"[RPDice] d{_selectedDie}{specPart}{modPart}{rollPart} = {total}{modeTag}";
 
@@ -264,31 +248,12 @@ public class DiceRollerWindow : Window, IDisposable
             _history.RemoveAt(_history.Count - 1);
     }
 
-    private static int RollDie(int sides) =>
-        Random.Shared.Next(1, sides + 1);
+    private static int RollDie(int sides) => Random.Shared.Next(1, sides + 1);
 
-    /// Returns the effective modifier for the given stat index, incorporating
-    /// any active passive condition adjustments and the AP exhaustion penalty.
-    private static int GetStatValue(RpCharacter ch, int statIdx)
+    private static int GetStatValue(RpCharacter ch, SheetField field, SheetTemplate template)
     {
-        if (statIdx < 1 || statIdx > 8) return 0;
-
-        SkillStat skillStat = StatMapping[statIdx - 1];
-
-        int raw = statIdx switch
-        {
-            1 => ch.Str,
-            2 => ch.Dex,
-            3 => ch.Spd,
-            4 => ch.Con,
-            5 => ch.Mem,
-            6 => ch.Mtl,
-            7 => ch.Int,
-            8 => ch.Cha,
-            _ => 10,
-        };
-
-        int passiveAdj = SkillHelpers.PassiveStatAdjust(ch, skillStat);
-        return SkillHelpers.StatMod(raw + passiveAdj) + SkillHelpers.ApPenalty(ch);
+        ch.StatValues.TryGetValue(field.Id, out int raw);
+        int passiveAdj = SkillHelpers.PassiveStatAdjust(ch, field.Id, template);
+        return SkillHelpers.StatMod(raw + passiveAdj) + SkillHelpers.ApPenalty(ch, template);
     }
 }

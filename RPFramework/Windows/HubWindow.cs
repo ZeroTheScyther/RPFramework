@@ -225,7 +225,10 @@ public class HubWindow : Window, IDisposable
     private void DrawPartyRow(Models.RpParty party)
     {
         plugin.PartyMembers.TryGetValue(party.Code, out var members);
-        int    onlineCount = members?.Count ?? 0;
+        string? localPid   = plugin.LocalPlayerId;
+        int onlineCount = members?.Count(m =>
+            m.PlayerId == localPid || plugin.KnownOnlinePlayers.Contains(m.PlayerId)) ?? 0;
+        int totalCount  = members?.Count ?? 0;
         bool   isOpen      = _openParties.Contains(party.Code);
         string rowId       = "pr_" + party.Code;
         float  rowW        = ContentWidth();
@@ -244,8 +247,7 @@ public class HubWindow : Window, IDisposable
             }
             ImGui.SameLine();
 
-            string? localId     = plugin.LocalPlayerId;
-            var     localMember = members?.FirstOrDefault(m => m.PlayerId == localId);
+            var     localMember = members?.FirstOrDefault(m => m.PlayerId == localPid);
             var     myRole      = localMember?.Role ?? PartyRole.Member;
             DrawIconColored(RoleIcon(myRole), RoleColor(myRole));
             if (ImGui.IsItemHovered()) ImGui.SetTooltip(RoleLabel(myRole));
@@ -271,9 +273,12 @@ public class HubWindow : Window, IDisposable
 
             ImGui.SameLine(leftEnd);
             float maxW = windowEndX - ellipsisW - ImGui.GetStyle().ItemSpacing.X - leftEnd - combatW;
-            ImGui.TextUnformatted(Truncate($"{party.Name}  [{onlineCount}]", maxW));
+            string countLabel = totalCount > onlineCount
+                ? $"{party.Name}  [{onlineCount}/{totalCount}]"
+                : $"{party.Name}  [{onlineCount}]";
+            ImGui.TextUnformatted(Truncate(countLabel, maxW));
             if (ImGui.IsItemHovered())
-                ImGui.SetTooltip($"{party.Code}   {onlineCount} online");
+                ImGui.SetTooltip($"{party.Code}   {onlineCount}/{totalCount} online");
 
             if (inCombat)
             {
@@ -313,8 +318,9 @@ public class HubWindow : Window, IDisposable
 
         foreach (var member in visibleMembers)
         {
-            bool   isMe  = member.PlayerId == localId;
-            string rowId = "mr_" + party.Code + "_" + member.PlayerId;
+            bool   isMe   = member.PlayerId == localId;
+            bool   online = isMe || plugin.KnownOnlinePlayers.Contains(member.PlayerId);
+            string rowId  = "mr_" + party.Code + "_" + member.PlayerId;
 
             bool hovered = _hovered.GetValueOrDefault(rowId);
             using var bg = ImRaii.PushColor(ImGuiCol.ChildBg, ImGui.GetColorU32(ImGuiCol.FrameBgHovered), hovered);
@@ -322,8 +328,8 @@ public class HubWindow : Window, IDisposable
             {
                 ImGui.AlignTextToFramePadding();
 
-                DrawIconColored(MemberIcon(member.Role, isMe), MemberColor(member.Role, isMe));
-                if (ImGui.IsItemHovered()) ImGui.SetTooltip(MemberTooltip(member.Role, isMe));
+                DrawIconColored(MemberIcon(member.Role, isMe, online), MemberColor(member.Role, isMe, online));
+                if (ImGui.IsItemHovered()) ImGui.SetTooltip(MemberTooltip(member.Role, isMe, online));
                 ImGui.SameLine();
                 float leftEnd = ImGui.GetCursorPosX();
 
@@ -506,11 +512,11 @@ public class HubWindow : Window, IDisposable
                 {
                     if (MenuButton(FontAwesomeIcon.Bolt, "Join Combat", "jc_" + party.Code))
                     {
-                        var ch       = plugin.GetOrCreateCharacter(localPid);
-                        int roll     = new Random().Next(1, 25);
-                        int spdBonus = SkillHelpers.StatMod(ch.Spd);
-                        string code  = party.Code;
-                        Task.Run(() => plugin.Network.PartySubmitRollAsync(code, roll, spdBonus));
+                        var ch        = plugin.GetOrCreateCharacter(localPid);
+                        int roll      = new Random().Next(1, 25);
+                        int initBonus = plugin.GetInitiativeBonus(ch, plugin.Configuration.ActiveTemplate);
+                        string code   = party.Code;
+                        Task.Run(() => plugin.Network.PartySubmitRollAsync(code, roll, initBonus));
                         plugin.InitiativeWindow.IsOpen = true;
                         ImGui.CloseCurrentPopup();
                     }
@@ -873,25 +879,32 @@ public class HubWindow : Window, IDisposable
         _               => "Member",
     };
 
-    private static FontAwesomeIcon MemberIcon(PartyRole r, bool isMe) => r switch
+    private static FontAwesomeIcon MemberIcon(PartyRole r, bool isMe, bool online) => r switch
     {
         PartyRole.Owner => FontAwesomeIcon.Crown,
         PartyRole.CoDm  => FontAwesomeIcon.UserShield,
-        _               => FontAwesomeIcon.User,
+        _               => online ? FontAwesomeIcon.User : FontAwesomeIcon.UserSlash,
     };
 
-    private static Vector4 MemberColor(PartyRole r, bool isMe) => r switch
+    private static Vector4 MemberColor(PartyRole r, bool isMe, bool online)
     {
-        PartyRole.Owner => new Vector4(1f, 0.82f, 0.2f, 1f),
-        PartyRole.CoDm  => new Vector4(0.7f, 0.6f, 1f, 1f),
-        _               => isMe
-            ? new Vector4(0.5f, 0.85f, 1f, 1f)
-            : new Vector4(0.35f, 0.85f, 0.35f, 1f),
-    };
+        if (!online)
+            return new Vector4(0.40f, 0.40f, 0.40f, 1f); // grey for all offline roles
 
-    private static string MemberTooltip(PartyRole r, bool isMe)
+        return r switch
+        {
+            PartyRole.Owner => new Vector4(1f, 0.82f, 0.2f, 1f),
+            PartyRole.CoDm  => new Vector4(0.7f, 0.6f, 1f, 1f),
+            _               => isMe
+                ? new Vector4(0.5f, 0.85f, 1f, 1f)
+                : new Vector4(0.35f, 0.85f, 0.35f, 1f),
+        };
+    }
+
+    private static string MemberTooltip(PartyRole r, bool isMe, bool online)
     {
-        string role = r switch { PartyRole.Owner => "DM", PartyRole.CoDm => "Co-DM", _ => "Member" };
-        return isMe ? $"You  ({role})" : role;
+        string role   = r switch { PartyRole.Owner => "DM", PartyRole.CoDm => "Co-DM", _ => "Member" };
+        string status = online ? "Online" : "Offline";
+        return isMe ? $"You  ({role})" : $"{role}  ({status})";
     }
 }

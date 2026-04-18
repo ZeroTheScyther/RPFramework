@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.SignalR.Client;
+using RPFramework.Models;
 using RPFramework.Models.Net;
 
 namespace RPFramework.Services;
@@ -62,15 +63,20 @@ public class NetworkService : IDisposable
     public event Action<CharacterProfileDto>? ProfileReceived;
     public event Action<string>?              ProfileFetchFailed; // playerId
 
+    // ── Sheet templates ───────────────────────────────────────────────────────
+    public event Action<string, SheetTemplate>? PartySheetTemplateReceived; // partyCode, template
+
     // ── Initiative events ─────────────────────────────────────────────────────
-    public event Action<string>?                     PartyInitiativeStarted;  // partyCode
-    public event Action<string, InitiativeStateDto>? PartyInitiativeUpdated;  // partyCode, state
-    public event Action<string>?                     PartyInitiativeEnded;    // partyCode
+    public event Action<string>?                     PartyInitiativeStarted;      // partyCode
+    public event Action<string, InitiativeStateDto>? PartyInitiativeUpdated;      // partyCode, state
+    public event Action<string>?                     PartyInitiativeEnded;        // partyCode
+    public event Action<string, bool>?               PartyInitiativeShowHpApChanged; // partyCode, showHpAp
 
     // ── Party events ──────────────────────────────────────────────────────────
     public event Action<PartyInfoDto>?           PartyInfoReceived;
     public event Action<string, PartyMemberDto>? PartyMemberJoined;       // code, member
-    public event Action<string, string>?         PartyMemberLeft;         // code, playerId
+    public event Action<string, string>?         PartyMemberLeft;         // code, playerId (left or kicked)
+    public event Action<string, string>?         PartyMemberDisconnected; // code, playerId (went offline)
     public event Action<string>?                 PartyDisbanded;          // code
     public event Action<string, string, List<string>>? PartyMemberBgmChanged;  // code, playerId, bgmRoomCodes
     public event Action<string, PartyMemberDto>?       PartyMemberRoleChanged; // code, member (with new role)
@@ -196,6 +202,10 @@ public class NetworkService : IDisposable
         _conn.On<string>("OnProfileNotFound",
             pid => Fire(() => ProfileFetchFailed?.Invoke(pid)));
 
+        // Sheet templates
+        _conn.On<SheetTemplateDto>("OnSheetTemplate",
+            dto => Fire(() => PartySheetTemplateReceived?.Invoke(dto.PartyCode, dto.Template)));
+
         // Parties
         _conn.On<PartyInfoDto>("OnPartyInfo",
             dto => Fire(() => PartyInfoReceived?.Invoke(dto)));
@@ -203,6 +213,8 @@ public class NetworkService : IDisposable
             (code, m) => Fire(() => PartyMemberJoined?.Invoke(code, m)));
         _conn.On<string, string>("OnPartyMemberLeft",
             (code, pid) => Fire(() => PartyMemberLeft?.Invoke(code, pid)));
+        _conn.On<string, string>("OnPartyMemberDisconnected",
+            (code, pid) => Fire(() => PartyMemberDisconnected?.Invoke(code, pid)));
         _conn.On<string>("OnPartyDisbanded",
             code => Fire(() => PartyDisbanded?.Invoke(code)));
         _conn.On<string, string, List<string>>("OnPartyMemberBgmChanged",
@@ -217,6 +229,8 @@ public class NetworkService : IDisposable
             (code, state) => Fire(() => PartyInitiativeUpdated?.Invoke(code, state)));
         _conn.On<string>("OnPartyInitiativeEnded",
             code => Fire(() => PartyInitiativeEnded?.Invoke(code)));
+        _conn.On<string, bool>("OnPartyInitiativeShowHpApChanged",
+            (code, show) => Fire(() => PartyInitiativeShowHpApChanged?.Invoke(code, show)));
 
         // Errors
         _conn.On<string, string>("OnError",
@@ -274,6 +288,9 @@ public class NetworkService : IDisposable
 
     public Task FetchProfileAsync(string playerId)
         => SafeInvoke("FetchProfile", playerId);
+
+    public Task PushSheetTemplateAsync(string partyCode, SheetTemplate template)
+        => SafeInvoke("PushSheetTemplate", new SheetTemplateDto(partyCode, template));
 
     // ═════════════════════════════════════════════════════════════════════════
     // Trading
@@ -350,6 +367,9 @@ public class NetworkService : IDisposable
 
     public Task PartyEndCombatAsync(string code)
         => SafeInvoke("PartyEndCombat", code);
+
+    public Task PartySetInitiativeShowHpApAsync(string code, bool show)
+        => SafeInvoke("PartySetInitiativeShowHpAp", code, show);
 
     public Task PartyLeaveAsync(string code)
         => SafeInvoke("PartyLeave", code);

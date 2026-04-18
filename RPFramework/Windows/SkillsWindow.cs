@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Utility;
@@ -15,9 +17,8 @@ public class SkillsWindow : Window, IDisposable
     private int  _selectedIdx = -1;
     private bool _dirty       = false;
 
-    private static readonly string[] StatNames      = { "HP", "AP", "STR", "DEX", "SPD", "CON", "MEM", "MTL", "INT", "CHA" };
-    private static readonly string[] CondOpNames    = { "<", "≤", "=", "≥", ">" };
-    private static readonly string[] EffectOpNames  = { "+", "−", "=" };
+    private static readonly string[] CondOpNames   = { "<", "≤", "=", "≥", ">" };
+    private static readonly string[] EffectOpNames = { "+", "−", "=" };
 
     public SkillsWindow(Plugin plugin)
         : base("RP Skills & Passives##RPFramework.Skills",
@@ -81,15 +82,11 @@ public class SkillsWindow : Window, IDisposable
                     if (selected)
                         ImGui.PopStyleColor();
 
-                    // Right-click context menu
                     if (ImGui.BeginPopupContextItem($"##rpsk_ctx{i}"))
                     {
                         _selectedIdx = i;
                         if (ImGui.MenuItem("Edit##rpsk_ctx_edit"))
-                        {
-                            sk.IsLocked = false;
-                            plugin.Configuration.Save();
-                        }
+                        { sk.IsLocked = false; plugin.Configuration.Save(); }
                         ImGui.Separator();
                         if (ImGui.MenuItem("Delete##rpsk_ctx_del"))
                             deleteAt = i;
@@ -120,7 +117,6 @@ public class SkillsWindow : Window, IDisposable
 
         ImGui.SameLine();
 
-        // ── Right pane ─────────────────────────────────────────────────────────
         using var rightChild = ImRaii.Child("##skilleditor", new Vector2(-1, -1), false);
         if (!rightChild) return;
 
@@ -130,13 +126,14 @@ public class SkillsWindow : Window, IDisposable
             return;
         }
 
-        var skill = ch.Skills[_selectedIdx];
+        var skill    = ch.Skills[_selectedIdx];
+        var template = plugin.Configuration.ActiveTemplate;
         _dirty = false;
 
         if (skill.IsLocked)
-            DrawLockedView(skill, ch, scale);
+            DrawLockedView(skill, ch, template, scale);
         else
-            DrawEditorView(skill, ch, scale);
+            DrawEditorView(skill, ch, template, scale);
 
         if (_dirty)
             plugin.Configuration.Save();
@@ -144,8 +141,12 @@ public class SkillsWindow : Window, IDisposable
 
     // ── Editor (unlocked) ─────────────────────────────────────────────────────
 
-    private void DrawEditorView(RpSkill skill, Models.RpCharacter ch, float scale)
+    private void DrawEditorView(RpSkill skill, RpCharacter ch, SheetTemplate template, float scale)
     {
+        // Build field lists for dropdowns
+        var allFields  = template.Groups.SelectMany(g => g.Fields).ToList();
+        var fieldNames = allFields.Select(f => f.Name).ToArray();
+
         // Name
         ImGui.TextUnformatted("Name");
         ImGui.SetNextItemWidth(-1);
@@ -169,7 +170,6 @@ public class SkillsWindow : Window, IDisposable
         ImGui.SameLine();
         if (ImGui.RadioButton("Passive##rpsk_tp", ref typeVal, 1)) { skill.Type = SkillType.Passive; _dirty = true; }
 
-        // Turn End trigger (passive only)
         if (skill.Type == SkillType.Passive)
         {
             ImGui.Spacing();
@@ -208,7 +208,7 @@ public class SkillsWindow : Window, IDisposable
 
             if (ImGui.BeginTable("##rpsk_conds", 5, ImGuiTableFlags.SizingFixedFit | ImGuiTableFlags.BordersInnerV))
             {
-                ImGui.TableSetupColumn("Stat",  ImGuiTableColumnFlags.WidthFixed, 58 * scale);
+                ImGui.TableSetupColumn("Field", ImGuiTableColumnFlags.WidthFixed, 80 * scale);
                 ImGui.TableSetupColumn("Op",    ImGuiTableColumnFlags.WidthFixed, 52 * scale);
                 ImGui.TableSetupColumn("Value", ImGuiTableColumnFlags.WidthFixed, 60 * scale);
                 ImGui.TableSetupColumn("%",     ImGuiTableColumnFlags.WidthFixed, 24 * scale);
@@ -222,10 +222,11 @@ public class SkillsWindow : Window, IDisposable
                     ImGui.PushID($"##cond{i}");
 
                     ImGui.TableSetColumnIndex(0);
-                    ImGui.SetNextItemWidth(54 * scale);
-                    int statI = (int)c.Stat;
-                    if (ImGui.Combo("##cs", ref statI, StatNames, StatNames.Length))
-                    { c.Stat = (SkillStat)statI; _dirty = true; }
+                    ImGui.SetNextItemWidth(76 * scale);
+                    int statI = allFields.FindIndex(f => f.Id == SkillHelpers.EffectiveFieldId(c));
+                    if (statI < 0) statI = 0;
+                    if (ImGui.Combo("##cs", ref statI, fieldNames, fieldNames.Length))
+                    { c.FieldId = allFields[statI].Id; _dirty = true; }
 
                     ImGui.TableSetColumnIndex(1);
                     ImGui.SetNextItemWidth(48 * scale);
@@ -255,7 +256,7 @@ public class SkillsWindow : Window, IDisposable
             }
 
             if (ImGui.SmallButton("+ Add Condition##rpsk_addcond"))
-            { skill.Conditions.Add(new SkillCondition()); _dirty = true; }
+            { skill.Conditions.Add(new SkillCondition { FieldId = allFields.FirstOrDefault()?.Id ?? "" }); _dirty = true; }
 
             ImGui.Spacing();
             ImGui.Separator();
@@ -266,7 +267,7 @@ public class SkillsWindow : Window, IDisposable
 
         if (ImGui.BeginTable("##rpsk_efx", 5, ImGuiTableFlags.SizingFixedFit | ImGuiTableFlags.BordersInnerV))
         {
-            ImGui.TableSetupColumn("Target", ImGuiTableColumnFlags.WidthFixed, 58 * scale);
+            ImGui.TableSetupColumn("Field", ImGuiTableColumnFlags.WidthFixed, 80 * scale);
             ImGui.TableSetupColumn("Op",     ImGuiTableColumnFlags.WidthFixed, 52 * scale);
             ImGui.TableSetupColumn("Value",  ImGuiTableColumnFlags.WidthFixed, 60 * scale);
             ImGui.TableSetupColumn("%",      ImGuiTableColumnFlags.WidthFixed, 24 * scale);
@@ -280,10 +281,11 @@ public class SkillsWindow : Window, IDisposable
                 ImGui.PushID($"##efx{i}");
 
                 ImGui.TableSetColumnIndex(0);
-                ImGui.SetNextItemWidth(54 * scale);
-                int tgtI = (int)fx.Target;
-                if (ImGui.Combo("##et", ref tgtI, StatNames, StatNames.Length))
-                { fx.Target = (SkillStat)tgtI; _dirty = true; }
+                ImGui.SetNextItemWidth(76 * scale);
+                int tgtI = allFields.FindIndex(f => f.Id == SkillHelpers.EffectiveFieldId(fx));
+                if (tgtI < 0) tgtI = 0;
+                if (ImGui.Combo("##et", ref tgtI, fieldNames, fieldNames.Length))
+                { fx.FieldId = allFields[tgtI].Id; _dirty = true; }
 
                 ImGui.TableSetColumnIndex(1);
                 ImGui.SetNextItemWidth(48 * scale);
@@ -313,13 +315,12 @@ public class SkillsWindow : Window, IDisposable
         }
 
         if (ImGui.SmallButton("+ Add Effect##rpsk_addefx"))
-        { skill.Effects.Add(new SkillEffect()); _dirty = true; }
+        { skill.Effects.Add(new SkillEffect { FieldId = allFields.FirstOrDefault()?.Id ?? "" }); _dirty = true; }
 
         ImGui.Spacing();
         ImGui.Separator();
         ImGui.Spacing();
 
-        // Save button (right-aligned)
         float saveW = 80 * scale;
         float avail = ImGui.GetContentRegionAvail().X;
         if (avail > saveW)
@@ -340,64 +341,69 @@ public class SkillsWindow : Window, IDisposable
 
     // ── Locked (read-only) view ───────────────────────────────────────────────
 
-    private void DrawLockedView(RpSkill skill, Models.RpCharacter ch, float scale)
+    private void DrawLockedView(RpSkill skill, RpCharacter ch, SheetTemplate template, float scale)
     {
-        // Name
+        string GetFieldName(string fid) => template.FindField(fid)?.Name ?? fid;
+
+        string typeBadge = skill.Type == SkillType.Active ? "[Active]" : "[Passive]";
+        ImGui.TextDisabled(typeBadge);
+        ImGui.SameLine();
         ImGui.TextUnformatted(skill.Name);
 
-        // Description
+        ImGui.Separator();
         if (!string.IsNullOrWhiteSpace(skill.Description))
         {
             ImGui.Spacing();
             ImGui.TextDisabled(skill.Description);
+            ImGui.Spacing();
         }
-
-        // Meta row
-        ImGui.Spacing();
-        string typeBadge = skill.Type == SkillType.Active ? "[Active]" : "[Passive]";
-        ImGui.TextDisabled(typeBadge);
-        if (skill.Cooldown > 0)
-        {
-            ImGui.SameLine();
-            ImGui.TextDisabled($"  Cooldown: {skill.Cooldown} turn{(skill.Cooldown == 1 ? "" : "s")}");
-        }
-        if (skill.Duration > 0)
-        {
-            ImGui.SameLine();
-            ImGui.TextDisabled($"  Duration: {skill.Duration} turn{(skill.Duration == 1 ? "" : "s")}");
-        }
-        if (skill.Type == SkillType.Passive && skill.TriggerOnTurnEnd)
-        {
-            ImGui.SameLine();
-            ImGui.TextColored(new Vector4(0.85f, 0.70f, 0.15f, 1f), "  [Turn End]");
-        }
-
-        ImGui.Spacing();
         ImGui.Separator();
 
-        // Conditions
+        ImGui.Spacing();
+        bool hasMeta = skill.Cooldown > 0 || skill.Duration > 0
+                       || (skill.Type == SkillType.Passive && skill.TriggerOnTurnEnd);
+        if (hasMeta)
+        {
+            bool first = true;
+            if (skill.Cooldown > 0)
+            {
+                ImGui.TextDisabled($"Cooldown: {skill.Cooldown} turn{(skill.Cooldown == 1 ? "" : "s")}");
+                first = false;
+            }
+            if (skill.Duration > 0)
+            {
+                if (!first) ImGui.SameLine();
+                ImGui.TextDisabled($"  Duration: {skill.Duration} turn{(skill.Duration == 1 ? "" : "s")}");
+                first = false;
+            }
+            if (skill.Type == SkillType.Passive && skill.TriggerOnTurnEnd)
+            {
+                if (!first) ImGui.SameLine();
+                ImGui.TextColored(new Vector4(0.85f, 0.70f, 0.15f, 1f), first ? "[Turn End]" : "  [Turn End]");
+            }
+            ImGui.Spacing();
+        }
+        ImGui.Separator();
+
         if (skill.Type == SkillType.Passive && skill.Conditions.Count > 0)
         {
             ImGui.TextUnformatted("Conditions");
             foreach (var c in skill.Conditions)
             {
                 string pct  = c.IsPercentage ? "%" : "";
-                string line = $"  {StatNames[(int)c.Stat]} {CondOpNames[(int)c.Op]} {c.Value:0}{pct}";
-                ImGui.TextDisabled(line);
+                ImGui.TextDisabled($"  {GetFieldName(SkillHelpers.EffectiveFieldId(c))} {CondOpNames[(int)c.Op]} {c.Value:0}{pct}");
             }
             ImGui.Spacing();
             ImGui.Separator();
         }
 
-        // Effects
         if (skill.Effects.Count > 0)
         {
             ImGui.TextUnformatted("Effects");
             foreach (var fx in skill.Effects)
             {
                 string pct  = fx.IsPercentage ? "%" : "";
-                string line = $"  {StatNames[(int)fx.Target]} {EffectOpNames[(int)fx.Op]} {fx.Value:0.#}{pct}";
-                ImGui.TextDisabled(line);
+                ImGui.TextDisabled($"  {GetFieldName(SkillHelpers.EffectiveFieldId(fx))} {EffectOpNames[(int)fx.Op]} {fx.Value:0.#}{pct}");
             }
         }
 
@@ -405,12 +411,11 @@ public class SkillsWindow : Window, IDisposable
         ImGui.Separator();
         ImGui.Spacing();
 
-        // Action row (same logic as editor)
         bool isConditionPassive = skill.Type == SkillType.Passive && skill.Conditions.Count > 0;
 
         if (isConditionPassive)
         {
-            bool active = SkillHelpers.ConditionsMet(skill, ch);
+            bool active = SkillHelpers.ConditionsMet(skill, ch, template);
             var  col    = active ? new Vector4(0.2f, 0.85f, 0.3f, 1f)
                                  : new Vector4(0.55f, 0.55f, 0.55f, 1f);
             ImGui.TextColored(col, active ? "● Active (applied in rolls)" : "● Inactive");
@@ -430,7 +435,7 @@ public class SkillsWindow : Window, IDisposable
             }
             else if (ImGui.Button(btnLabel))
             {
-                SkillHelpers.ApplyEffects(skill, ch);
+                SkillHelpers.ApplyEffects(skill, ch, template);
                 plugin.Configuration.Save();
                 plugin.PushLocalProfile();
             }

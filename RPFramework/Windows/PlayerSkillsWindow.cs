@@ -14,18 +14,19 @@ namespace RPFramework.Windows;
 /// </summary>
 public class PlayerSkillsWindow : Window, IDisposable
 {
+    private readonly Plugin _plugin;
     private CharacterProfileDto _profile;
     private int _selectedIdx = -1;
     private readonly Action<string> _onClosed;
 
-    private static readonly string[] StatNames     = { "HP", "AP", "STR", "DEX", "SPD", "CON", "MEM", "MTL", "INT", "CHA" };
     private static readonly string[] CondOpNames   = { "<", "≤", "=", "≥", ">" };
     private static readonly string[] EffectOpNames = { "+", "−", "=" };
 
-    public PlayerSkillsWindow(CharacterProfileDto profile, Action<string> onClosed)
+    public PlayerSkillsWindow(Plugin plugin, CharacterProfileDto profile, Action<string> onClosed)
         : base($"{profile.DisplayName} Skills##rpsk_{profile.PlayerId}",
                ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse)
     {
+        _plugin   = plugin;
         _profile  = profile;
         _onClosed = onClosed;
         SizeConstraints = new WindowSizeConstraints
@@ -51,7 +52,6 @@ public class PlayerSkillsWindow : Window, IDisposable
         float scale = ImGuiHelpers.GlobalScale;
         float leftW = 170 * scale;
 
-        // ── Left pane: skill list ─────────────────────────────────────────────
         using (var left = ImRaii.Child("##rpviewsklist", new Vector2(leftW, -1), false))
         {
             if (left)
@@ -66,14 +66,9 @@ public class PlayerSkillsWindow : Window, IDisposable
                     string label = $"{badge} {sk.Name}##rpviewsk_{i}";
                     bool   sel   = _selectedIdx == i;
 
-                    if (sel)
-                        ImGui.PushStyleColor(ImGuiCol.Header, new Vector4(0.26f, 0.59f, 0.98f, 0.4f));
-
-                    if (ImGui.Selectable(label, sel))
-                        _selectedIdx = i;
-
-                    if (sel)
-                        ImGui.PopStyleColor();
+                    if (sel) ImGui.PushStyleColor(ImGuiCol.Header, new Vector4(0.26f, 0.59f, 0.98f, 0.4f));
+                    if (ImGui.Selectable(label, sel)) _selectedIdx = i;
+                    if (sel) ImGui.PopStyleColor();
                 }
 
                 if (_profile.Skills.Count == 0)
@@ -83,7 +78,6 @@ public class PlayerSkillsWindow : Window, IDisposable
 
         ImGui.SameLine();
 
-        // ── Right pane: skill detail ──────────────────────────────────────────
         using var right = ImRaii.Child("##rpviewskeditor", new Vector2(-1, -1), false);
         if (!right) return;
 
@@ -98,17 +92,17 @@ public class PlayerSkillsWindow : Window, IDisposable
 
     private void DrawSkillView(RpSkillDto skill)
     {
-        // Name
+        var template = _plugin.Configuration.ActiveTemplate;
+        string GetFieldName(string fid) => template.FindField(fid)?.Name ?? fid;
+
         ImGui.TextUnformatted(skill.Name);
 
-        // Description
         if (!string.IsNullOrWhiteSpace(skill.Description))
         {
             ImGui.Spacing();
             ImGui.TextDisabled(skill.Description);
         }
 
-        // Meta row
         ImGui.Spacing();
         string typeBadge = skill.Type == SkillType.Active ? "[Active]" : "[Passive]";
         ImGui.TextDisabled(typeBadge);
@@ -118,27 +112,27 @@ public class PlayerSkillsWindow : Window, IDisposable
         ImGui.Spacing();
         ImGui.Separator();
 
-        // Conditions
         if (skill.Type == SkillType.Passive && skill.Conditions.Count > 0)
         {
             ImGui.TextUnformatted("Conditions");
             foreach (var c in skill.Conditions)
             {
+                string fid = SkillHelpers.EffectiveFieldId(c);
                 string pct = c.IsPercentage ? "%" : "";
-                ImGui.TextDisabled($"  {StatNames[(int)c.Stat]} {CondOpNames[(int)c.Op]} {c.Value:0}{pct}");
+                ImGui.TextDisabled($"  {GetFieldName(fid)} {CondOpNames[(int)c.Op]} {c.Value:0}{pct}");
             }
             ImGui.Spacing();
             ImGui.Separator();
         }
 
-        // Effects
         if (skill.Effects.Count > 0)
         {
             ImGui.TextUnformatted("Effects");
             foreach (var fx in skill.Effects)
             {
+                string fid = SkillHelpers.EffectiveFieldId(fx);
                 string pct = fx.IsPercentage ? "%" : "";
-                ImGui.TextDisabled($"  {StatNames[(int)fx.Target]} {EffectOpNames[(int)fx.Op]} {fx.Value:0.#}{pct}");
+                ImGui.TextDisabled($"  {GetFieldName(fid)} {EffectOpNames[(int)fx.Op]} {fx.Value:0.#}{pct}");
             }
         }
     }

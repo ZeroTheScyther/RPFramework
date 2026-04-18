@@ -7,12 +7,42 @@ public static class SkillHelpers
     /// D&D-style stat modifier: floor((stat − 10) / 2).
     public static int StatMod(int stat) => (int)Math.Floor((stat - 10) / 2.0);
 
+    // ── Legacy SkillStat → FieldId mapping ───────────────────────────────────
+    // Used to resolve pre-refactor skill data that stored SkillStat enum values.
+
+    public static string LegacyStatId(SkillStat s) => s switch
+    {
+        SkillStat.Hp  => WellKnownIds.Hp,
+        SkillStat.Ap  => WellKnownIds.Ap,
+        SkillStat.Str => WellKnownIds.Str,
+        SkillStat.Dex => WellKnownIds.Dex,
+        SkillStat.Spd => WellKnownIds.Spd,
+        SkillStat.Con => WellKnownIds.Con,
+        SkillStat.Mem => WellKnownIds.Mem,
+        SkillStat.Mtl => WellKnownIds.Mtl,
+        SkillStat.Int => WellKnownIds.Int,
+        SkillStat.Cha => WellKnownIds.Cha,
+        _             => WellKnownIds.Hp,
+    };
+
+    public static string EffectiveFieldId(SkillCondition c)
+        => string.IsNullOrEmpty(c.FieldId) ? LegacyStatId(c.Stat) : c.FieldId;
+
+    public static string EffectiveFieldId(SkillEffect fx)
+        => string.IsNullOrEmpty(fx.FieldId) ? LegacyStatId(fx.Target) : fx.FieldId;
+
+    // ── AP exhaustion penalty ─────────────────────────────────────────────────
+
     /// AP exhaustion penalty applied to ALL stat rolls.
     /// Thresholds: ≤40% → -1, ≤30% → -2, ≤20% → -4, ≤10% → -5.
-    public static int ApPenalty(RpCharacter ch)
+    public static int ApPenalty(RpCharacter ch, SheetTemplate template)
     {
-        if (ch.ApMax <= 0) return 0;
-        float pct = (float)ch.ApCurrent / ch.ApMax;
+        var ap = template.FindApBar();
+        if (ap == null) return 0;
+        ch.StatValues.TryGetValue(ap.Id + ":cur", out int cur);
+        ch.StatValues.TryGetValue(ap.Id + ":max", out int max);
+        if (max <= 0) return 0;
+        float pct = (float)cur / max;
         return pct switch
         {
             <= 0.10f => -5,
@@ -23,26 +53,25 @@ public static class SkillHelpers
         };
     }
 
-    /// Sum of raw stat deltas applied to dice rolls for the given stat.
-    /// Sources: condition-based passives whose conditions are currently met,
-    ///          and any skill with DurationRemaining > 0 (timed buffs/debuffs).
-    /// Applied to the raw stat value BEFORE the StatMod formula.
-    public static int PassiveStatAdjust(RpCharacter ch, SkillStat stat)
+    // ── Passive stat adjust ───────────────────────────────────────────────────
+
+    /// Sum of raw stat deltas from active passives for the given field ID.
+    /// Applied BEFORE the StatMod formula.
+    public static int PassiveStatAdjust(RpCharacter ch, string fieldId, SheetTemplate template)
     {
         int total = 0;
         foreach (var skill in ch.Skills)
         {
-            bool conditionActive = skill.Type == SkillType.Passive
-                                   && skill.Conditions.Count > 0
-                                   && ConditionsMet(skill, ch);
-            bool durationActive  = skill.DurationRemaining > 0;
-
-            if (!conditionActive && !durationActive) continue;
+            bool condActive = skill.Type == SkillType.Passive
+                              && skill.Conditions.Count > 0
+                              && ConditionsMet(skill, ch, template);
+            bool durActive  = skill.DurationRemaining > 0;
+            if (!condActive && !durActive) continue;
 
             foreach (var fx in skill.Effects)
             {
-                if (fx.Target != stat) continue;
-                float amt = fx.Value;   // % on raw stats has no clear meaning — treat as flat
+                if (EffectiveFieldId(fx) != fieldId) continue;
+                float amt = fx.Value;
                 total += fx.Op switch
                 {
                     EffectOp.Add      =>  (int)Math.Round(amt),
@@ -54,18 +83,19 @@ public static class SkillHelpers
         return total;
     }
 
-    /// Returns true when every condition on the skill is satisfied by the character's current state.
-    public static bool ConditionsMet(RpSkill skill, RpCharacter ch)
+    // ── Condition evaluation ──────────────────────────────────────────────────
+
+    public static bool ConditionsMet(RpSkill skill, RpCharacter ch, SheetTemplate template)
     {
         foreach (var c in skill.Conditions)
-            if (!EvalCondition(c, ch)) return false;
+            if (!EvalCondition(c, ch, template)) return false;
         return true;
     }
 
-    static bool EvalCondition(SkillCondition c, RpCharacter ch)
+    static bool EvalCondition(SkillCondition c, RpCharacter ch, SheetTemplate template)
     {
-        float raw = GetStatRaw(c.Stat, ch);
-        float max = GetStatMax(c.Stat, ch);
+        string fid = EffectiveFieldId(c);
+        var (raw, max) = GetFieldValues(fid, ch, template);
         float cmp = c.IsPercentage && max > 0 ? raw / max * 100f : raw;
         return c.Op switch
         {
@@ -78,82 +108,117 @@ public static class SkillHelpers
         };
     }
 
-    /// Activates a skill's effects.
-    /// - HP/AP effects are always applied immediately (instant, regardless of Duration).
-    /// - Stat effects (Str/Dex/etc.): if Duration == 0, applied permanently; if Duration > 0,
-    ///   skipped here — they take effect via PassiveStatAdjust while DurationRemaining > 0.
-    /// Sets DurationRemaining and CooldownRemaining when applicable.
-    public static void ApplyEffects(RpSkill skill, RpCharacter ch)
+    // ── Effect application ────────────────────────────────────────────────────
+
+    /// Activates a skill's effects against the character's dynamic stat dicts.
+    /// Bar effects are always applied immediately.
+    /// Stat/number effects: permanent when Duration == 0; skipped when Duration > 0
+    ///   (they take effect via PassiveStatAdjust while DurationRemaining > 0).
+    public static void ApplyEffects(RpSkill skill, RpCharacter ch, SheetTemplate template)
     {
-        bool timed = skill.Duration > 0;
+        bool timed  = skill.Duration > 0;
+        var  hpBar  = template.FindHpBar();
+        var  apBar  = template.FindApBar();
 
         foreach (var fx in skill.Effects)
         {
-            // For timed skills, stat effects are handled as temporary modifiers — skip permanent write
-            if (timed && fx.Target != SkillStat.Hp && fx.Target != SkillStat.Ap)
-                continue;
+            string fid   = EffectiveFieldId(fx);
+            var    field  = template.FindField(fid);
+            bool   isBar  = field?.Type == FieldType.Bar;
+            bool   isHpAp = (hpBar != null && fid == hpBar.Id)
+                         || (apBar != null && fid == apBar.Id);
 
-            float maxVal = GetStatMax(fx.Target, ch);
+            if (timed && !isHpAp) continue;
+
+            var (_, maxVal) = GetFieldValues(fid, ch, template);
             float amount = fx.IsPercentage && maxVal > 0 ? maxVal * fx.Value / 100f : fx.Value;
-            int   delta  = fx.Op switch
+            int delta = fx.Op switch
             {
                 EffectOp.Add      =>  (int)Math.Round(amount),
                 EffectOp.Subtract => -(int)Math.Round(amount),
                 _                 =>  0,
             };
 
-            switch (fx.Target)
+            if (field == null) continue;
+
+            switch (field.Type)
             {
-                case SkillStat.Hp:
-                    int effHpMax = ch.HpMax + StatMod(ch.Con);
-                    ch.HpCurrent = fx.Op == EffectOp.Set
-                        ? Math.Clamp((int)Math.Round(amount), 0, effHpMax)
-                        : Math.Clamp(ch.HpCurrent + delta,   0, effHpMax);
+                case FieldType.Bar:
+                {
+                    string curKey = fid + ":cur";
+                    string maxKey = fid + ":max";
+                    ch.StatValues.TryGetValue(maxKey, out int barMax);
+                    int bonus = 0;
+                    if (field.BonusSourceFieldId != null &&
+                        ch.StatValues.TryGetValue(field.BonusSourceFieldId, out int bonusSrc))
+                        bonus = StatMod(bonusSrc);
+                    int effMax = barMax + bonus;
+                    ch.StatValues.TryGetValue(curKey, out int curVal);
+                    ch.StatValues[curKey] = fx.Op == EffectOp.Set
+                        ? Math.Clamp((int)Math.Round(amount), 0, effMax)
+                        : Math.Clamp(curVal + delta, 0, effMax);
                     break;
-                case SkillStat.Ap:
-                    ch.ApCurrent = fx.Op == EffectOp.Set
-                        ? Math.Clamp((int)Math.Round(amount), 0, ch.ApMax)
-                        : Math.Clamp(ch.ApCurrent + delta,   0, ch.ApMax);
+                }
+                case FieldType.Dot:
+                {
+                    string curKey = fid + ":cur";
+                    int    dotMax = field.Max > 0 ? field.Max : 5;
+                    ch.StatValues.TryGetValue(curKey, out int curVal);
+                    ch.StatValues[curKey] = fx.Op == EffectOp.Set
+                        ? Math.Clamp((int)Math.Round(amount), 0, dotMax)
+                        : Math.Clamp(curVal + delta, 0, dotMax);
                     break;
-                // Raw stats — NOT clamped; skills can break the 8–20 UI cap
-                case SkillStat.Str: ch.Str = fx.Op == EffectOp.Set ? (int)Math.Round(amount) : ch.Str + delta; break;
-                case SkillStat.Dex: ch.Dex = fx.Op == EffectOp.Set ? (int)Math.Round(amount) : ch.Dex + delta; break;
-                case SkillStat.Spd: ch.Spd = fx.Op == EffectOp.Set ? (int)Math.Round(amount) : ch.Spd + delta; break;
-                case SkillStat.Con: ch.Con = fx.Op == EffectOp.Set ? (int)Math.Round(amount) : ch.Con + delta; break;
-                case SkillStat.Mem: ch.Mem = fx.Op == EffectOp.Set ? (int)Math.Round(amount) : ch.Mem + delta; break;
-                case SkillStat.Mtl: ch.Mtl = fx.Op == EffectOp.Set ? (int)Math.Round(amount) : ch.Mtl + delta; break;
-                case SkillStat.Int: ch.Int = fx.Op == EffectOp.Set ? (int)Math.Round(amount) : ch.Int + delta; break;
-                case SkillStat.Cha: ch.Cha = fx.Op == EffectOp.Set ? (int)Math.Round(amount) : ch.Cha + delta; break;
+                }
+                case FieldType.Number:
+                {
+                    ch.StatValues.TryGetValue(fid, out int numVal);
+                    ch.StatValues[fid] = fx.Op == EffectOp.Set
+                        ? (int)Math.Round(amount)
+                        : numVal + delta;
+                    break;
+                }
+                case FieldType.Checkbox:
+                    if (fx.Op == EffectOp.Set)
+                        ch.CheckValues[fid] = Math.Round(amount) >= 1;
+                    break;
             }
         }
 
-        if (skill.Duration > 0)
-            skill.DurationRemaining = skill.Duration;
-        if (skill.Cooldown > 0)
-            skill.CooldownRemaining = skill.Cooldown;
+        if (skill.Duration > 0) skill.DurationRemaining = skill.Duration;
+        if (skill.Cooldown > 0) skill.CooldownRemaining = skill.Cooldown;
     }
 
-    // ── Internal helpers ────────────────────────────────────────────────────────
+    // ── Internal helpers ──────────────────────────────────────────────────────
 
-    static float GetStatRaw(SkillStat s, RpCharacter ch) => s switch
+    static (float raw, float max) GetFieldValues(string fieldId, RpCharacter ch, SheetTemplate template)
     {
-        SkillStat.Hp  => ch.HpCurrent,
-        SkillStat.Ap  => ch.ApCurrent,
-        SkillStat.Str => ch.Str,
-        SkillStat.Dex => ch.Dex,
-        SkillStat.Spd => ch.Spd,
-        SkillStat.Con => ch.Con,
-        SkillStat.Mem => ch.Mem,
-        SkillStat.Mtl => ch.Mtl,
-        SkillStat.Int => ch.Int,
-        SkillStat.Cha => ch.Cha,
-        _             => 0,
-    };
+        var field = template?.FindField(fieldId);
 
-    static float GetStatMax(SkillStat s, RpCharacter ch) => s switch
-    {
-        SkillStat.Hp => ch.HpMax > 0 ? ch.HpMax : 1,
-        SkillStat.Ap => ch.ApMax > 0 ? ch.ApMax : 1,
-        _            => 20f,   // raw stats: percentage conditions reference 20 as max
-    };
+        if (field == null)
+        {
+            ch.StatValues.TryGetValue(fieldId, out int v);
+            return (v, 20f);
+        }
+
+        return field.Type switch
+        {
+            FieldType.Bar => (
+                ch.StatValues.TryGetValue(fieldId + ":cur", out int cur) ? cur : 0,
+                ch.StatValues.TryGetValue(fieldId + ":max", out int max) && max > 0 ? max : 1
+            ),
+            FieldType.Dot => (
+                ch.StatValues.TryGetValue(fieldId + ":cur", out int dcur) ? dcur : 0,
+                field.Max > 0 ? field.Max : 5f
+            ),
+            FieldType.Number => (
+                ch.StatValues.TryGetValue(fieldId, out int v) ? v : 0,
+                field.Max > 0 ? field.Max : 20f
+            ),
+            FieldType.Checkbox => (
+                ch.CheckValues.TryGetValue(fieldId, out bool b) && b ? 1f : 0f,
+                1f
+            ),
+            _ => (0, 1),
+        };
+    }
 }
