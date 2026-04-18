@@ -105,9 +105,12 @@ public record CharacterProfileDto(
 /// <summary>Sheet template broadcast from a DM to their party members.</summary>
 public record SheetTemplateDto(string PartyCode, SheetTemplate Template);
 
+/// <summary>Dice roll broadcast sent to all party members.</summary>
+public record DiceRollBroadcastDto(string PartyCode, string PlayerId, string DisplayName, string Message);
+
 // ── Initiative ────────────────────────────────────────────────────────────────
 
-public record InitiativeEntryDto(string PlayerId, string DisplayName, int Roll, int SpdBonus, int Total, int HpCurrent, int HpMax, int ApCurrent, int ApMax);
+public record InitiativeEntryDto(string PlayerId, string DisplayName, int Roll, int SpdBonus, int Total, int HpCurrent, int HpMax, int ApCurrent, int ApMax, bool IsNpc = false);
 
 public record InitiativeStateDto(
     string                   PartyCode,

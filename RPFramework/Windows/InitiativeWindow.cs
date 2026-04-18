@@ -18,6 +18,7 @@ public class InitiativeWindow : Window, IDisposable
     private readonly Plugin _plugin;
     private string? _partyCode;    // which party's initiative is currently displayed
     private bool    _showSettings; // whether the settings panel is open
+    private string  _npcNameBuf = "";
 
     public InitiativeWindow(Plugin plugin)
         : base("RP Initiative##RPFramework.Initiative",
@@ -189,7 +190,7 @@ public class InitiativeWindow : Window, IDisposable
         // Calculate bottom reservation for buttons
         bool showEndTurn   = isMyTurn || isDmOrCoDm;
         bool showEndCombat = isDmOrCoDm;
-        int  btnCount      = (showEndTurn ? 1 : 0) + (showEndCombat ? 1 : 0);
+        int  btnCount      = (showEndTurn ? 1 : 0) + (showEndCombat ? 1 : 0) + (isDmOrCoDm ? 1 : 0);
         float btnH         = ImGui.GetFrameHeight() + ImGui.GetStyle().ItemSpacing.Y;
         float bottomH      = btnCount > 0 ? (btnCount * btnH + 4 * scale) : 2 * scale;
 
@@ -246,13 +247,18 @@ public class InitiativeWindow : Window, IDisposable
                             else
                                 ImGui.TextDisabled($"{i + 1}.");
 
-                            // Column 1: display name (with optional strikethrough)
+                            // Column 1: display name (with optional strikethrough + NPC context menu)
                             ImGui.TableSetColumnIndex(1);
                             var nameColor = incapacitated
                                 ? new Vector4(0.55f, 0.55f, 0.55f, 1f)
                                 : isCurrent
                                     ? new Vector4(1f, 1f, 1f, 1f)
                                     : new Vector4(0.60f, 0.60f, 0.60f, 1f);
+                            if (entry.IsNpc)
+                                ImGui.TextColored(new Vector4(0.85f, 0.65f, 0.30f, 1f), "[NPC] ");
+                            else
+                                ImGui.TextColored(nameColor, "");
+                            ImGui.SameLine(0f, entry.IsNpc ? 2f : 0f);
                             ImGui.TextColored(nameColor, entry.DisplayName);
                             if (incapacitated)
                             {
@@ -264,6 +270,19 @@ public class InitiativeWindow : Window, IDisposable
                                     new Vector2(rMax.X, midY),
                                     ImGui.ColorConvertFloat4ToU32(new Vector4(0.80f, 0.20f, 0.20f, 0.85f)),
                                     1.5f * scale);
+                            }
+
+                            // Right-click to remove NPC (DM only)
+                            if (entry.IsNpc && isDmOrCoDm &&
+                                ImGui.BeginPopupContextItem($"##npc_ctx_{i}"))
+                            {
+                                if (ImGui.MenuItem($"Remove {entry.DisplayName}"))
+                                {
+                                    string partyCode = state.PartyCode;
+                                    string npcId     = entry.PlayerId;
+                                    Task.Run(() => _plugin.Network.PartyRemoveNpcAsync(partyCode, npcId));
+                                }
+                                ImGui.EndPopup();
                             }
 
                             if (showHpAp)
@@ -366,6 +385,25 @@ public class InitiativeWindow : Window, IDisposable
                 string partyCode = state.PartyCode;
                 Task.Run(() => _plugin.Network.PartyEndCombatAsync(partyCode));
             }
+        }
+
+        if (isDmOrCoDm)
+        {
+            ImGuiHelpers.ScaledDummy(2f);
+            float addBtnW = 80f * scale;
+            ImGui.SetNextItemWidth(-addBtnW - ImGui.GetStyle().ItemSpacing.X);
+            ImGui.InputTextWithHint("##ini_npcname", "NPC name…", ref _npcNameBuf, 64);
+            ImGui.SameLine();
+            bool canAdd = !string.IsNullOrWhiteSpace(_npcNameBuf);
+            if (!canAdd) ImGui.BeginDisabled();
+            if (ImGui.Button("Add NPC##ini_addnpc", new Vector2(addBtnW, 0)) && canAdd)
+            {
+                string partyCode = state.PartyCode;
+                string name      = _npcNameBuf.Trim();
+                _npcNameBuf      = "";
+                Task.Run(() => _plugin.Network.PartyAddNpcAsync(partyCode, name));
+            }
+            if (!canAdd) ImGui.EndDisabled();
         }
     }
 }

@@ -66,6 +66,9 @@ public class NetworkService : IDisposable
     // ── Sheet templates ───────────────────────────────────────────────────────
     public event Action<string, SheetTemplate>? PartySheetTemplateReceived; // partyCode, template
 
+    // ── Dice rolls ────────────────────────────────────────────────────────────
+    public event Action<DiceRollBroadcastDto>? DiceRollReceived;
+
     // ── Initiative events ─────────────────────────────────────────────────────
     public event Action<string>?                     PartyInitiativeStarted;      // partyCode
     public event Action<string, InitiativeStateDto>? PartyInitiativeUpdated;      // partyCode, state
@@ -206,6 +209,10 @@ public class NetworkService : IDisposable
         _conn.On<SheetTemplateDto>("OnSheetTemplate",
             dto => Fire(() => PartySheetTemplateReceived?.Invoke(dto.PartyCode, dto.Template)));
 
+        // Dice rolls
+        _conn.On<DiceRollBroadcastDto>("OnDiceRoll",
+            dto => Fire(() => DiceRollReceived?.Invoke(dto)));
+
         // Parties
         _conn.On<PartyInfoDto>("OnPartyInfo",
             dto => Fire(() => PartyInfoReceived?.Invoke(dto)));
@@ -292,6 +299,9 @@ public class NetworkService : IDisposable
     public Task PushSheetTemplateAsync(string partyCode, SheetTemplate template)
         => SafeInvoke("PushSheetTemplate", new SheetTemplateDto(partyCode, template));
 
+    public Task BroadcastDiceRollAsync(DiceRollBroadcastDto dto)
+        => SafeInvoke("BroadcastDiceRoll", dto);
+
     // ═════════════════════════════════════════════════════════════════════════
     // Trading
     // ═════════════════════════════════════════════════════════════════════════
@@ -370,6 +380,12 @@ public class NetworkService : IDisposable
 
     public Task PartySetInitiativeShowHpApAsync(string code, bool show)
         => SafeInvoke("PartySetInitiativeShowHpAp", code, show);
+
+    public Task PartyAddNpcAsync(string code, string npcName)
+        => SafeInvoke("PartyAddNpc", code, npcName);
+
+    public Task PartyRemoveNpcAsync(string code, string npcPlayerId)
+        => SafeInvoke("PartyRemoveNpc", code, npcPlayerId);
 
     public Task PartyLeaveAsync(string code)
         => SafeInvoke("PartyLeave", code);

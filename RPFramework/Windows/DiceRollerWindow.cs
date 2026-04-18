@@ -240,12 +240,33 @@ public class DiceRollerWindow : Window, IDisposable
                             : "";
         string specPart = specName.Length > 0 ? $" [{specName}]" : "";
 
-        string line = $"[RPDice] d{_selectedDie}{specPart}{modPart}{rollPart} = {total}{modeTag}";
+        string line = $"d{_selectedDie}{specPart}{modPart}{rollPart} = {total}{modeTag}";
 
-        Plugin.ChatGui.Print(line);
+        Plugin.ChatGui.Print(new Dalamud.Game.Text.XivChatEntry
+        {
+            Message = new Dalamud.Game.Text.SeStringHandling.SeStringBuilder()
+                .AddUiForeground("[RPDice] ", 32)
+                .AddText(line)
+                .Build(),
+            Type = Dalamud.Game.Text.XivChatType.Echo,
+        });
+
         _history.Insert(0, line);
         if (_history.Count > 5)
             _history.RemoveAt(_history.Count - 1);
+
+        // Broadcast to party members
+        if (plugin.Network.IsConnected)
+        {
+            string? pid         = plugin.LocalPlayerId;
+            string  displayName = plugin.LocalDisplayName;
+            foreach (var party in plugin.Configuration.Parties)
+            {
+                var dto = new RPFramework.Models.Net.DiceRollBroadcastDto(
+                    party.Code, pid ?? "", displayName, line);
+                System.Threading.Tasks.Task.Run(() => plugin.Network.BroadcastDiceRollAsync(dto));
+            }
+        }
     }
 
     private static int RollDie(int sides) => Random.Shared.Next(1, sides + 1);

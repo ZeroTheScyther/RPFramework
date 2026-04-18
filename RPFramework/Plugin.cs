@@ -150,6 +150,7 @@ public sealed class Plugin : IDalamudPlugin
         Network.PartyInitiativeEnded          += OnPartyInitiativeEnded;
         Network.PartyInitiativeShowHpApChanged += OnPartyInitiativeShowHpApChanged;
         Network.PartySheetTemplateReceived     += OnSheetTemplateReceived;
+        Network.DiceRollReceived               += OnDiceRollReceived;
 
         MigrateCharacters();
 
@@ -207,6 +208,7 @@ public sealed class Plugin : IDalamudPlugin
         Network.PartyInitiativeEnded           -= OnPartyInitiativeEnded;
         Network.PartyInitiativeShowHpApChanged -= OnPartyInitiativeShowHpApChanged;
         Network.PartySheetTemplateReceived     -= OnSheetTemplateReceived;
+        Network.DiceRollReceived               -= OnDiceRollReceived;
 
         ContextMenu.OnMenuOpened -= OnContextMenuOpened;
 
@@ -729,6 +731,18 @@ public sealed class Plugin : IDalamudPlugin
     {
         Configuration.ActiveTemplate = template;
         Configuration.Save();
+    }
+
+    private void OnDiceRollReceived(DiceRollBroadcastDto dto)
+    {
+        ChatGui.Print(new Dalamud.Game.Text.XivChatEntry
+        {
+            Message = new Dalamud.Game.Text.SeStringHandling.SeStringBuilder()
+                .AddUiForeground("[RPDice] ", 32)
+                .AddText($"{dto.DisplayName}: {dto.Message}")
+                .Build(),
+            Type = Dalamud.Game.Text.XivChatType.Echo,
+        });
     }
 
     public void PushLocalProfile()
