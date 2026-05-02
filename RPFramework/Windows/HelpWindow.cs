@@ -40,7 +40,7 @@ public class HelpWindow : Window
         float scale = ImGuiHelpers.GlobalScale;
         float leftW = 130f * scale;
 
-        // ── Left panel — topic list ───────────────────────────────────────────
+        // ── Left panel - topic list ───────────────────────────────────────────
         using (var left = ImRaii.Child("##helplist", new Vector2(leftW, -1), true))
         {
             if (left)
@@ -64,7 +64,7 @@ public class HelpWindow : Window
 
         ImGui.SameLine();
 
-        // ── Right panel — content ─────────────────────────────────────────────
+        // ── Right panel - content ─────────────────────────────────────────────
         using var right = ImRaii.Child("##helpcontent", new Vector2(-1, -1), false);
         if (!right) return;
 
@@ -136,7 +136,7 @@ public class HelpWindow : Window
     {
         Title("RPFramework", "Multiplayer roleplaying companion for FFXIV");
 
-        Body("RPFramework lets you and your party track characters, roll dice, run combat initiative, share atmospheric music, and trade items — all synced in real time through a relay server.");
+        Body("RPFramework lets you and your party track characters, roll dice, run combat initiative, share atmospheric music, and trade items - all synced in real time through a relay server.");
 
         ImGuiHelpers.ScaledDummy(6f);
         Section("Getting started");
@@ -147,31 +147,31 @@ public class HelpWindow : Window
 
         ImGuiHelpers.ScaledDummy(6f);
         Section("All commands");
-        Cmd("/rphub",          "— connection, parties, trading");
-        Cmd("/rpstats  /rpsheet  /rpcs", "— character sheet");
-        Cmd("/rpdice",         "— dice roller");
-        Cmd("/rpskills  /rpsk","— skills and passives");
-        Cmd("/rpini",          "— initiative tracker");
-        Cmd("/rpbgm",          "— background music player");
-        Cmd("/rpinventory  /rpinv", "— inventory and trading");
-        Cmd("/rpsettings",     "— server URL and plugin options");
-        Cmd("/rphelp",         "— this window");
+        Cmd("/rphub",          "- connection, parties, trading");
+        Cmd("/rpstats  /rpsheet  /rpcs", "- character sheet");
+        Cmd("/rpdice",         "- dice roller");
+        Cmd("/rpskills  /rpsk","- skills and passives");
+        Cmd("/rpini",          "- initiative tracker");
+        Cmd("/rpbgm",          "- background music player");
+        Cmd("/rpinventory  /rpinv", "- inventory and trading");
+        Cmd("/rpsettings",     "- server URL and plugin options");
+        Cmd("/rphelp",         "- this window");
     }
 
     private static void DrawRpStats(float scale)
     {
-        Title("RPSTATS — Character Sheet", "/rpstats  •  /rpsheet  •  /rpcs");
+        Title("RPSTATS - Character Sheet", "/rpstats  •  /rpsheet  •  /rpcs");
 
-        Body("Your character sheet holds all stats, resource bars, and specializations. Every field is defined by the party's DM — they control the layout through the template editor.");
+        Body("Your character sheet holds all stats, resource bars, and specializations. Every field is defined by the party's DM - they control the layout through the template editor.");
 
         ImGuiHelpers.ScaledDummy(6f);
         Section("Field types");
-        Bullet("Number — a single integer value (e.g. STR 14). Optionally shows a D&D-style modifier: (value − 10) ÷ 2, rounded down.");
-        Bullet("Bar — a current / max pair (e.g. HP 40 / 50). The HP bar is tracked in the initiative window. The AP bar drives exhaustion penalties in RPDICE.");
-        Bullet("Checkbox — a proficiency or boolean flag. Checked means proficient, which grants advantage in RPDICE.");
+        Bullet("Number - a single integer value (e.g. STR 14). Optionally shows a D&D-style modifier: (value − 10) ÷ 2, rounded down.");
+        Bullet("Bar - a current / max pair (e.g. HP 40 / 50). The HP bar is tracked in the initiative window. The AP bar drives exhaustion penalties in RPDICE.");
+        Bullet("Checkbox - a proficiency or boolean flag. Checked means proficient, which grants advantage in RPDICE.");
 
         ImGuiHelpers.ScaledDummy(6f);
-        Section("For DMs — template editor");
+        Section("For DMs - template editor");
         Bullet("Click the pencil icon (✏) in the title bar to open the editor.");
         Bullet("Add, remove, rename, and reorder groups and fields freely.");
         Bullet("Each field can have a tooltip that players see when hovering its name.");
@@ -186,24 +186,24 @@ public class HelpWindow : Window
 
     private static void DrawRpDice(float scale)
     {
-        Title("RPDICE — Dice Roller", "/rpdice  •  /rpdice d20  •  /rpdice d6");
+        Title("RPDICE - Dice Roller", "/rpdice  •  /rpdice d20  •  /rpdice d6");
 
         Body("Roll any standard die or a custom size. Results appear in the chat log with a full breakdown.");
 
         ImGuiHelpers.ScaledDummy(6f);
         Section("Options");
-        Bullet("Stat Modifier — select a Number field from the sheet. Its modifier ((value − 10) ÷ 2) is added to the roll.");
-        Bullet("Specialization — select a Checkbox field. If you have proficiency in it you roll twice and keep the higher result.");
-        Bullet("Advantage — roll twice, keep the higher. Disadvantage — roll twice, keep the lower.");
+        Bullet("Stat Modifier - select a Number field from the sheet. Its modifier ((value − 10) ÷ 2) is added to the roll.");
+        Bullet("Specialization - select a Checkbox field. If you have proficiency in it you roll twice and keep the higher result.");
+        Bullet("Advantage - roll twice, keep the higher. Disadvantage - roll twice, keep the lower.");
         Bullet("Proficiency cancels Disadvantage: they offset each other and you roll once normally.");
 
         ImGuiHelpers.ScaledDummy(6f);
         Section("AP Exhaustion");
         Body("When your AP bar is low, an automatic penalty is applied to all stat rolls:");
-        Bullet("≤ 40% AP — −1");
-        Bullet("≤ 30% AP — −2");
-        Bullet("≤ 20% AP — −4");
-        Bullet("≤ 10% AP — −5");
+        Bullet("≤ 40% AP - −1");
+        Bullet("≤ 30% AP - −2");
+        Bullet("≤ 20% AP - −4");
+        Bullet("≤ 10% AP - −5");
 
         ImGuiHelpers.ScaledDummy(6f);
         Section("Quick roll from chat");
@@ -212,15 +212,15 @@ public class HelpWindow : Window
 
     private static void DrawRpSkills(float scale)
     {
-        Title("RPSKILLS — Skills & Passives", "/rpskills  •  /rpsk");
+        Title("RPSKILLS - Skills & Passives", "/rpskills  •  /rpsk");
 
-        Body("Define active abilities and passive effects tied to your character's sheet fields. Skills are personal — each player manages their own.");
+        Body("Define active abilities and passive effects tied to your character's sheet fields. Skills are personal - each player manages their own.");
 
         ImGuiHelpers.ScaledDummy(6f);
         Section("Active skills");
-        Bullet("Manually triggered during RP (no mechanical enforcement — the system tracks cooldowns and durations, but activation is honour-based).");
-        Bullet("Cooldown — turns remaining before the skill can be used again. Ticks down when you end your turn in initiative.");
-        Bullet("Duration — turns the skill's effects remain active. Also ticks on turn end.");
+        Bullet("Manually triggered during RP (no mechanical enforcement - the system tracks cooldowns and durations, but activation is honour-based).");
+        Bullet("Cooldown - turns remaining before the skill can be used again. Ticks down when you end your turn in initiative.");
+        Bullet("Duration - turns the skill's effects remain active. Also ticks on turn end.");
 
         ImGuiHelpers.ScaledDummy(6f);
         Section("Passive skills");
@@ -235,7 +235,7 @@ public class HelpWindow : Window
 
     private static void DrawRpInitiative(float scale)
     {
-        Title("RPINITIATIVE — Initiative Tracker", "/rpini");
+        Title("RPINITIATIVE - Initiative Tracker", "/rpini");
 
         Body("Tracks turn order for combat encounters. All party members see the same live state.");
 
@@ -259,7 +259,7 @@ public class HelpWindow : Window
 
     private static void DrawRpBgm(float scale)
     {
-        Title("RPBGM — Background Music", "/rpbgm");
+        Title("RPBGM - Background Music", "/rpbgm");
 
         Body("Share atmospheric music with party members in real time using YouTube links. The room owner controls playback and everyone hears the same track at the same position.");
 
@@ -268,7 +268,7 @@ public class HelpWindow : Window
         Bullet("Open /rpbgm and create a room (or join one using the room code).");
         Bullet("Add songs by pasting a YouTube URL and giving them a title.");
         Bullet("The room owner can play, pause, seek, stop, and change loop mode.");
-        Bullet("Audio is downloaded locally and streamed through the plugin — no external software needed.");
+        Bullet("Audio is downloaded locally and streamed through the plugin - no external software needed.");
 
         ImGuiHelpers.ScaledDummy(6f);
         Section("BGM and parties");
@@ -277,7 +277,7 @@ public class HelpWindow : Window
 
     private static void DrawRpInventory(float scale)
     {
-        Title("RPINVENTORY — Inventory & Trading", "/rpinventory  •  /rpinv");
+        Title("RPINVENTORY - Inventory & Trading", "/rpinventory  •  /rpinv");
 
         Body("Manage personal bags of items and trade with other players online in the same party.");
 
@@ -285,7 +285,7 @@ public class HelpWindow : Window
         Section("Personal bags");
         Bullet("Create multiple named bags to organise your items.");
         Bullet("Each item has a name, description, FFXIV icon ID, and quantity.");
-        Bullet("Items are stored locally — they are not synced to the server.");
+        Bullet("Items are stored locally - they are not synced to the server.");
 
         ImGuiHelpers.ScaledDummy(6f);
         Section("Trading");
@@ -296,14 +296,14 @@ public class HelpWindow : Window
 
         ImGuiHelpers.ScaledDummy(6f);
         Section("Shared bags");
-        Bullet("Create a shared bag and invite another player — both can add, remove, and modify items in real time.");
+        Bullet("Create a shared bag and invite another player - both can add, remove, and modify items in real time.");
         Bullet("Changes are synced through the server and visible to all participants instantly.");
         Bullet("The bag owner can dissolve it; any participant can leave at any time.");
     }
 
     private static void DrawRpHub(float scale)
     {
-        Title("RPHUB — Hub & Connection", "/rphub");
+        Title("RPHUB - Hub & Connection", "/rphub");
 
         Body("The central panel for server connection, party management, and player interactions. Most multiplayer features flow through here.");
 
@@ -321,9 +321,9 @@ public class HelpWindow : Window
 
         ImGuiHelpers.ScaledDummy(6f);
         Section("Roles");
-        Bullet("Owner (DM) — full control: start/end initiative, publish sheet templates, kick members, promote Co-DMs.");
-        Bullet("Co-DM — shared DM abilities: start/end initiative, end anyone's turn, publish templates. Cannot kick other Co-DMs.");
-        Bullet("Member — standard player: roll initiative, end own turn.");
+        Bullet("Owner (DM) - full control: start/end initiative, publish sheet templates, kick members, promote Co-DMs.");
+        Bullet("Co-DM - shared DM abilities: start/end initiative, end anyone's turn, publish templates. Cannot kick other Co-DMs.");
+        Bullet("Member - standard player: roll initiative, end own turn.");
 
         ImGuiHelpers.ScaledDummy(6f);
         Section("Player interactions");

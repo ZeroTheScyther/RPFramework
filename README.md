@@ -9,7 +9,7 @@ The central panel for server connection, party management, and player interactio
 
 - Connect to a relay server and create or join parties with a display name and password
 - Be a member of multiple parties simultaneously
-- Roles: **Owner (DM)** — full control; **Co-DM** — shared initiative/template control; **Member** — roll and end own turn
+- Roles: **Owner (DM)** - full control; **Co-DM** - shared initiative/template control; **Member** - roll and end own turn
 - Right-click any online party member to view their character sheet, their skills, or offer them an item
 - Start combat initiative for the party from here
 
@@ -27,14 +27,14 @@ Roll any standard die or a custom size. Results appear in chat with a full break
 - Select a stat modifier (Number field) and/or a specialization (Checkbox field)
 - Advantage / Disadvantage: roll twice and keep the higher or lower result
 - Proficiency in a specialization grants advantage; proficiency cancels disadvantage and you roll once normally
-- **AP Exhaustion** — automatic penalty when your AP bar is low: ≤40% → −1, ≤30% → −2, ≤20% → −4, ≤10% → −5
+- **AP Exhaustion** - automatic penalty when your AP bar is low: ≤40% → −1, ≤30% → −2, ≤20% → −4, ≤10% → −5
 - Quick roll from chat: `/rpdice d20`, `/rpdice d6`, `/rpdice d100`, etc.
 
 ### RP Skills (`/rpskills`, `/rpsk`)
 Define active abilities and passive effects tied to your character's sheet fields.
 
-- **Active skills** — manually triggered; the system tracks cooldowns and durations (honour-based)
-- **Passive skills** — fire automatically on turn end or whenever all conditions are met
+- **Active skills** - manually triggered; the system tracks cooldowns and durations (honour-based)
+- **Passive skills** - fire automatically on turn end or whenever all conditions are met
 - Conditions check any sheet field with <, ≤, =, ≥, or > (percentage mode for bars)
 - Effects apply +, −, or = to a target field when the passive fires
 - Cooldowns and durations tick down automatically when you end your turn in RPINITIATIVE
@@ -50,13 +50,13 @@ Live turn-order tracker for combat encounters. All party members see the same st
 - Combatants at 0 HP or AP are shown greyed-out with a strikethrough
 
 ### RP BGM (`/rpbgm`)
-Synchronized music player — share atmospheric audio with party members in real time.
+Synchronized music player - share atmospheric audio with party members in real time.
 
 - Create or join a room; add songs from YouTube URLs
 - Owner controls: play, pause, stop, seek, previous/next, loop modes (None/Single/All)
 - Members automatically follow the owner's playback state with latency compensation
 - DMs and Co-DMs in the same party automatically have room owner privileges
-- Audio cached locally — no re-downloads; clear the cache from Settings
+- Audio cached locally - no re-downloads; clear the cache from Settings
 
 ### RP Inventory (`/rpinventory`, `/rpinv`)
 Custom item bags separate from your real FFXIV inventory, for items that don't exist in-game.
@@ -64,7 +64,7 @@ Custom item bags separate from your real FFXIV inventory, for items that don't e
 - Create multiple named bags; each item has a name, description, FFXIV icon ID, and quantity
 - Track a Gil balance per bag
 - Right-click a party member in RPHUB to offer them an item (transfer or send a copy)
-- **Shared bags** — invite another player to a bag; all participants see live updates synced through the server
+- **Shared bags** - invite another player to a bag; all participants see live updates synced through the server
 
 ### Settings (`/rpsettings`)
 - Configure the relay server URL and connect/disconnect
@@ -84,7 +84,7 @@ RPFramework is distributed via a custom Dalamud plugin repository.
 
 ## Relay Server
 
-Multiplayer features (trading, shared bags, BGM sync, parties, initiative) require a running instance of **RPFrameworkServer** — an ASP.NET Core SignalR server included in this repository under `RPFrameworkServer/`.
+Multiplayer features (trading, shared bags, BGM sync, parties, initiative) require a running instance of **RPFrameworkServer** - an ASP.NET Core SignalR server included in this repository under `RPFrameworkServer/`.
 
 You can host it yourself or use a shared community instance. Set the server URL in `/rpsettings` and click **Connect** while logged in to FFXIV.
 
