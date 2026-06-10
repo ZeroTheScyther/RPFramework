@@ -41,10 +41,16 @@ public class DiceRollerWindow : Window, IDisposable
     public override void Draw()
     {
         string? pid = plugin.LocalPlayerId;
-        RpCharacter? ch = pid != null ? plugin.GetOrCreateCharacter(pid) : null;
+        RpCharacter? ch = pid != null
+            ? (plugin.Configuration.ActivePartyCode != null
+                ? plugin.GetOrCreatePartyCharacter(plugin.Configuration.ActivePartyCode, pid)
+                : plugin.GetOrCreateCharacter(pid))
+            : null;
         float scale = ImGuiHelpers.GlobalScale;
 
-        var template     = plugin.Configuration.ActiveTemplate;
+        var template = plugin.Configuration.ActivePartyCode != null
+            ? plugin.GetPartyTemplate(plugin.Configuration.ActivePartyCode)
+            : plugin.Configuration.ActiveTemplate;
         var numberFields = template.Groups.SelectMany(g => g.Fields)
                                           .Where(f => f.Type == FieldType.Number)
                                           .ToList();

@@ -17,15 +17,18 @@ public class PlayerSheetWindow : Window, IDisposable
 {
     private readonly Plugin _plugin;
     private CharacterProfileDto _profile;
+    private readonly string? _partyCode;
     private readonly Action<string> _onClosed;
 
-    public PlayerSheetWindow(Plugin plugin, CharacterProfileDto profile, Action<string> onClosed)
+    public PlayerSheetWindow(Plugin plugin, CharacterProfileDto profile, string? partyCode,
+                             Action<string> onClosed)
         : base($"{profile.DisplayName} Character Sheet##rpcs_{profile.PlayerId}",
                ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse)
     {
-        _plugin   = plugin;
-        _profile  = profile;
-        _onClosed = onClosed;
+        _plugin    = plugin;
+        _profile   = profile;
+        _partyCode = partyCode;
+        _onClosed  = onClosed;
         SizeConstraints = new WindowSizeConstraints
         {
             MinimumSize = new Vector2(340, 480),
@@ -42,7 +45,9 @@ public class PlayerSheetWindow : Window, IDisposable
     public override void Draw()
     {
         var   p        = _profile;
-        var   template = _plugin.Configuration.ActiveTemplate;
+        var   template = _partyCode != null
+            ? _plugin.GetPartyTemplate(_partyCode)
+            : _plugin.Configuration.ActiveTemplate;
         float scale    = ImGuiHelpers.GlobalScale;
 
         using var scroll = ImRaii.Child("##psheetscroll", new Vector2(-1, -1), false, ImGuiWindowFlags.HorizontalScrollbar);

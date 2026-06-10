@@ -16,7 +16,10 @@ namespace RPFramework.Windows;
 public class CharacterSheetWindow : Window, IDisposable
 {
     private readonly Plugin _plugin;
-    private bool _editMode = false;
+
+    // null = party picker screen; set = viewing/editing that party's sheet
+    private string? _partyCode;
+    private bool    _editMode = false;
 
     public CharacterSheetWindow(Plugin plugin)
         : base("RP Character Sheet##RPFramework.CharSheet",
@@ -30,16 +33,31 @@ public class CharacterSheetWindow : Window, IDisposable
         };
         Size          = new Vector2(400, 600);
         SizeCondition = ImGuiCond.FirstUseEver;
-
-        TitleBarButtons.Add(new TitleBarButton
-        {
-            Icon        = FontAwesomeIcon.PencilAlt,
-            ShowTooltip = () => ImGui.SetTooltip(_editMode ? "Exit template editor" : "Edit sheet template"),
-            Click       = _ => _editMode = !_editMode,
-        });
     }
 
     public void Dispose() { }
+
+    // ── Public API ─────────────────────────────────────────────────────────────
+
+    public void OpenPicker()
+    {
+        _partyCode = null;
+        _editMode  = false;
+    }
+
+    public void OpenForParty(string partyCode)
+    {
+        _partyCode = partyCode;
+        _editMode  = false;
+    }
+
+    public void OpenTemplateEditorForParty(string partyCode)
+    {
+        _partyCode = partyCode;
+        _editMode  = true;
+    }
+
+    // ── Draw ──────────────────────────────────────────────────────────────────
 
     public override void Draw()
     {
@@ -50,19 +68,125 @@ public class CharacterSheetWindow : Window, IDisposable
             return;
         }
 
-        var template = _plugin.Configuration.ActiveTemplate;
+        // Auto-open when there's exactly one party and no explicit choice yet
+        if (_partyCode == null && _plugin.Configuration.Parties.Count == 1)
+            _partyCode = _plugin.Configuration.Parties[0].Code;
 
-        if (_editMode)
+        if (_partyCode == null)
         {
-            DrawTemplateEditor(template, pid);
+            DrawPartyPicker();
             return;
         }
 
-        var   ch    = _plugin.GetOrCreateCharacter(pid);
-        float scale = ImGuiHelpers.GlobalScale;
-        bool  dirty = false;
+        if (_editMode)
+        {
+            DrawTemplateEditor(_partyCode, pid);
+            return;
+        }
 
-        using var scroll = ImRaii.Child("##sheetscroll", new Vector2(-1, -1), false, ImGuiWindowFlags.HorizontalScrollbar);
+        DrawSheet(_partyCode, pid);
+    }
+
+    // ── Party picker ──────────────────────────────────────────────────────────
+
+    private void DrawPartyPicker()
+    {
+        float scale = ImGuiHelpers.GlobalScale;
+
+        ImGui.TextUnformatted("Character Sheets");
+        ImGui.Separator();
+        ImGuiHelpers.ScaledDummy(4f);
+
+        var parties = _plugin.Configuration.Parties;
+        if (parties.Count == 0)
+        {
+            ImGui.TextDisabled("You are not in any parties.");
+            ImGuiHelpers.ScaledDummy(2f);
+            ImGui.TextDisabled("Join a party in RP Hub to get started.");
+            return;
+        }
+
+        foreach (var party in parties)
+        {
+            bool isActive = _plugin.Configuration.ActivePartyCode == party.Code;
+            _plugin.PartyMembers.TryGetValue(party.Code, out var members);
+            int count = members?.Count ?? 0;
+
+            float btnW  = ImGui.GetContentRegionAvail().X;
+            float btnH  = ImGui.GetFrameHeight() * 1.6f;
+
+            using (ImRaii.PushColor(ImGuiCol.Button,        new Vector4(0.18f, 0.22f, 0.28f, 1f)))
+            using (ImRaii.PushColor(ImGuiCol.ButtonHovered, new Vector4(0.25f, 0.32f, 0.42f, 1f)))
+            {
+                if (ImGui.Button($"##pick_{party.Code}", new Vector2(btnW, btnH)))
+                {
+                    _partyCode = party.Code;
+                    _editMode  = false;
+                }
+            }
+
+            // Overlay text on top of the button
+            var btnMin = ImGui.GetItemRectMin();
+            var btnMax = ImGui.GetItemRectMax();
+            var dl     = ImGui.GetWindowDrawList();
+
+            string label    = party.Name;
+            string sublabel = $"{party.Code}  ·  {count} member{(count == 1 ? "" : "s")}";
+            if (isActive) label += "  ★";
+
+            float textX = btnMin.X + 10f * scale;
+            float textY = btnMin.Y + (btnMax.Y - btnMin.Y - ImGui.GetTextLineHeight() * 2f -
+                                      ImGui.GetStyle().ItemSpacing.Y) * 0.5f;
+            uint white  = ImGui.ColorConvertFloat4ToU32(new Vector4(1f, 1f, 1f, 1f));
+            uint grey   = ImGui.ColorConvertFloat4ToU32(new Vector4(0.55f, 0.55f, 0.60f, 1f));
+            uint gold   = ImGui.ColorConvertFloat4ToU32(new Vector4(1f, 0.82f, 0.2f, 1f));
+
+            dl.AddText(new Vector2(textX, textY), isActive ? gold : white, label);
+            dl.AddText(new Vector2(textX, textY + ImGui.GetTextLineHeight() +
+                                           ImGui.GetStyle().ItemSpacing.Y), grey, sublabel);
+
+            ImGuiHelpers.ScaledDummy(4f);
+        }
+    }
+
+    // ── Sheet rendering ────────────────────────────────────────────────────────
+
+    private void DrawSheet(string partyCode, string pid)
+    {
+        var template = _plugin.GetPartyTemplate(partyCode);
+        var ch       = _plugin.GetOrCreatePartyCharacter(partyCode, pid);
+        float scale  = ImGuiHelpers.GlobalScale;
+        bool dirty   = false;
+
+        // Back button (only when more than one party)
+        if (_plugin.Configuration.Parties.Count > 1)
+        {
+            using (ImRaii.PushFont(Plugin.PluginInterface.UiBuilder.IconFontFixedWidthHandle.Lock().ImFont))
+                ImGui.TextUnformatted(FontAwesomeIcon.ArrowLeft.ToIconString());
+            if (ImGui.IsItemClicked()) { _partyCode = null; return; }
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip("Back to party list");
+            ImGui.SameLine();
+        }
+
+        // Show DM pencil if this player is DM for this party (shortcut to template editor)
+        bool isDm = IsLocalPlayerDmForParty(pid, partyCode);
+        if (isDm)
+        {
+            ImGui.AlignTextToFramePadding();
+            using (ImRaii.PushFont(Plugin.PluginInterface.UiBuilder.IconFontFixedWidthHandle.Lock().ImFont))
+                ImGui.TextUnformatted(FontAwesomeIcon.PencilAlt.ToIconString());
+            if (ImGui.IsItemClicked()) _editMode = true;
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip("Edit sheet template");
+            ImGui.SameLine();
+        }
+
+        var party = _plugin.Configuration.Parties.Find(p => p.Code == partyCode);
+        ImGui.TextDisabled(party?.Name ?? partyCode);
+
+        ImGui.Separator();
+
+        using var scroll = ImRaii.Child("##sheetscroll", new Vector2(-1, -1), false,
+                                        ImGuiWindowFlags.HorizontalScrollbar);
         if (!scroll) goto save;
 
         foreach (var group in template.Groups)
@@ -79,9 +203,8 @@ public class CharacterSheetWindow : Window, IDisposable
         }
     }
 
-    // ── Sheet rendering ────────────────────────────────────────────────────────
-
-    private void DrawGroup(SheetGroup group, RpCharacter ch, SheetTemplate template, float scale, ref bool dirty)
+    private void DrawGroup(SheetGroup group, RpCharacter ch, SheetTemplate template,
+                           float scale, ref bool dirty)
     {
         ImGui.TextUnformatted(group.Name);
         ImGui.Separator();
@@ -124,7 +247,8 @@ public class CharacterSheetWindow : Window, IDisposable
                 ImGui.TableSetupColumn("##sm2", ImGuiTableColumnFlags.WidthFixed, 34 * scale);
 
                 for (int i = 0; i < numbers.Count; i += 2)
-                    DrawNumberRow(numbers[i], i + 1 < numbers.Count ? numbers[i + 1] : null, ch, scale, ref dirty);
+                    DrawNumberRow(numbers[i], i + 1 < numbers.Count ? numbers[i + 1] : null,
+                                  ch, scale, ref dirty);
 
                 ImGui.EndTable();
             }
@@ -250,7 +374,6 @@ public class CharacterSheetWindow : Window, IDisposable
         float gap     = 3f * scale;
         int?  newVal  = null;
 
-        // Vertically center the dots with the text line
         float dotH    = 2f * r;
         float baseY   = ImGui.GetCursorPosY();
         float yOffset = MathF.Max(0f, (ImGui.GetTextLineHeight() - dotH) * 0.5f);
@@ -289,14 +412,25 @@ public class CharacterSheetWindow : Window, IDisposable
 
     // ── Template editor ────────────────────────────────────────────────────────
 
-    private void DrawTemplateEditor(SheetTemplate template, string pid)
+    private void DrawTemplateEditor(string partyCode, string pid)
     {
-        float scale = ImGuiHelpers.GlobalScale;
+        float scale    = ImGuiHelpers.GlobalScale;
+        var   template = _plugin.GetPartyTemplate(partyCode);
+
+        // Back button
+        if (_plugin.Configuration.Parties.Count > 1 || true) // always show back in editor
+        {
+            using (ImRaii.PushFont(Plugin.PluginInterface.UiBuilder.IconFontFixedWidthHandle.Lock().ImFont))
+                ImGui.TextUnformatted(FontAwesomeIcon.ArrowLeft.ToIconString());
+            if (ImGui.IsItemClicked()) { _editMode = false; return; }
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip("Back to character sheet");
+            ImGui.SameLine();
+        }
 
         ImGui.TextUnformatted("Edit Sheet Template");
         ImGui.SameLine();
 
-        bool isDm    = IsLocalPlayerDm(pid);
+        bool isDm    = IsLocalPlayerDmForParty(pid, partyCode);
         float pubW   = 130 * scale;
         float availX = ImGui.GetContentRegionAvail().X;
         ImGui.SetCursorPosX(ImGui.GetCursorPosX() + availX - pubW);
@@ -306,7 +440,7 @@ public class CharacterSheetWindow : Window, IDisposable
         using (ImRaii.PushColor(ImGuiCol.ButtonHovered, new Vector4(0.25f, 0.60f, 0.90f, 1f)))
         {
             if (ImGui.Button("Publish ▶ Party##tmpl_pub", new Vector2(pubW, 0)))
-                PublishTemplate(template, pid);
+                PublishTemplate(template, pid, partyCode);
         }
         if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
             ImGui.SetTooltip(isDm ? "Push this template to all party members."
@@ -321,6 +455,7 @@ public class CharacterSheetWindow : Window, IDisposable
         if (ImGui.Button("+ Add Group##tmpl_addgrp"))
         {
             template.Groups.Add(new SheetGroup());
+            _plugin.Configuration.PartyTemplates[partyCode] = template;
             _plugin.Configuration.Save();
         }
 
@@ -336,19 +471,19 @@ public class CharacterSheetWindow : Window, IDisposable
             ImGui.SetNextItemWidth(140 * scale);
             string gname = g.Name;
             if (ImGui.InputText("##gn", ref gname, 64))
-            { g.Name = gname; _plugin.Configuration.Save(); }
+            { g.Name = gname; SaveTemplate(partyCode, template); }
 
             ImGui.SameLine();
             if (gi > 0)
             {
                 if (ImGui.ArrowButton("##gu", ImGuiDir.Up))
-                { (template.Groups[gi - 1], template.Groups[gi]) = (g, template.Groups[gi - 1]); _plugin.Configuration.Save(); }
+                { (template.Groups[gi - 1], template.Groups[gi]) = (g, template.Groups[gi - 1]); SaveTemplate(partyCode, template); }
                 ImGui.SameLine();
             }
             if (gi < template.Groups.Count - 1)
             {
                 if (ImGui.ArrowButton("##gd", ImGuiDir.Down))
-                { (template.Groups[gi], template.Groups[gi + 1]) = (template.Groups[gi + 1], g); _plugin.Configuration.Save(); }
+                { (template.Groups[gi], template.Groups[gi + 1]) = (template.Groups[gi + 1], g); SaveTemplate(partyCode, template); }
                 ImGui.SameLine();
             }
             using (ImRaii.PushColor(ImGuiCol.Button, new Vector4(0.65f, 0.12f, 0.12f, 1f)))
@@ -357,10 +492,10 @@ public class CharacterSheetWindow : Window, IDisposable
             }
 
             using (ImRaii.PushIndent(10f * scale, false))
-                DrawFieldEditorTable(g, template, scale);
+                DrawFieldEditorTable(g, template, scale, partyCode);
 
             if (ImGui.Button($"+ Add Field##fadd{gi}"))
-            { g.Fields.Add(new SheetField()); _plugin.Configuration.Save(); }
+            { g.Fields.Add(new SheetField()); SaveTemplate(partyCode, template); }
 
             ImGui.Spacing();
             ImGui.Separator();
@@ -369,10 +504,11 @@ public class CharacterSheetWindow : Window, IDisposable
         }
 
         if (delGrp >= 0)
-        { template.Groups.RemoveAt(delGrp); _plugin.Configuration.Save(); }
+        { template.Groups.RemoveAt(delGrp); SaveTemplate(partyCode, template); }
     }
 
-    private void DrawFieldEditorTable(SheetGroup group, SheetTemplate template, float scale)
+    private void DrawFieldEditorTable(SheetGroup group, SheetTemplate template,
+                                      float scale, string partyCode)
     {
         if (group.Fields.Count == 0)
         {
@@ -394,19 +530,17 @@ public class CharacterSheetWindow : Window, IDisposable
             var f = group.Fields[fi];
             ImGui.PushID($"f{fi}");
 
-            // Name
             ImGui.SetNextItemWidth(100 * scale);
             string fname = f.Name;
             if (ImGui.InputText("##fn", ref fname, 32))
-            { f.Name = fname; _plugin.Configuration.Save(); }
+            { f.Name = fname; SaveTemplate(partyCode, template); }
 
             ImGui.SameLine();
 
-            // Type
             ImGui.SetNextItemWidth(50 * scale);
             int typeI = (int)f.Type;
             if (ImGui.Combo("##ft", ref typeI, typeNames, typeNames.Length))
-            { f.Type = (FieldType)typeI; _plugin.Configuration.Save(); }
+            { f.Type = (FieldType)typeI; SaveTemplate(partyCode, template); }
 
             ImGui.SameLine();
 
@@ -416,18 +550,18 @@ public class CharacterSheetWindow : Window, IDisposable
                     ImGui.SetNextItemWidth(38 * scale);
                     int fmin = f.Min;
                     if (ImGui.InputInt("##fmn", ref fmin, 0, 0))
-                    { f.Min = fmin; _plugin.Configuration.Save(); }
+                    { f.Min = fmin; SaveTemplate(partyCode, template); }
                     if (ImGui.IsItemHovered()) ImGui.SetTooltip("Min");
                     ImGui.SameLine(); ImGui.TextUnformatted("-"); ImGui.SameLine();
                     ImGui.SetNextItemWidth(38 * scale);
                     int fmax = f.Max;
                     if (ImGui.InputInt("##fmx", ref fmax, 0, 0))
-                    { f.Max = fmax; _plugin.Configuration.Save(); }
+                    { f.Max = fmax; SaveTemplate(partyCode, template); }
                     if (ImGui.IsItemHovered()) ImGui.SetTooltip("Max");
                     ImGui.SameLine();
                     bool showMod = f.ShowModifier;
                     if (ImGui.Checkbox("Mod##fm", ref showMod))
-                    { f.ShowModifier = showMod; _plugin.Configuration.Save(); }
+                    { f.ShowModifier = showMod; SaveTemplate(partyCode, template); }
                     if (ImGui.IsItemHovered()) ImGui.SetTooltip("Show D&D-style modifier");
                     ImGui.SameLine();
                     bool isInit = f.IsInitiativeStat;
@@ -438,7 +572,7 @@ public class CharacterSheetWindow : Window, IDisposable
                                 foreach (var other in g2.Fields)
                                     if (other.Id != f.Id) other.IsInitiativeStat = false;
                         f.IsInitiativeStat = isInit;
-                        _plugin.Configuration.Save();
+                        SaveTemplate(partyCode, template);
                     }
                     if (ImGui.IsItemHovered()) ImGui.SetTooltip("Used for initiative rolls");
                     break;
@@ -447,8 +581,8 @@ public class CharacterSheetWindow : Window, IDisposable
                     ImGui.SetNextItemWidth(38 * scale);
                     int dotMaxEd = f.Max > 0 ? f.Max : 5;
                     if (ImGui.InputInt("##fdotmax", ref dotMaxEd, 0, 0))
-                    { f.Max = Math.Clamp(dotMaxEd, 1, 20); _plugin.Configuration.Save(); }
-                    if (ImGui.IsItemHovered()) ImGui.SetTooltip("Number of dots (1–20)");
+                    { f.Max = Math.Clamp(dotMaxEd, 1, 20); SaveTemplate(partyCode, template); }
+                    if (ImGui.IsItemHovered()) ImGui.SetTooltip("Number of dots (1-20)");
                     break;
 
                 case FieldType.Bar:
@@ -457,14 +591,14 @@ public class CharacterSheetWindow : Window, IDisposable
                         if (numberFields[bi].Id == f.BonusSourceFieldId) { bonusIdx = bi + 1; break; }
                     ImGui.SetNextItemWidth(68 * scale);
                     if (ImGui.Combo("##fb", ref bonusIdx, bonusOptions, bonusOptions.Length))
-                    { f.BonusSourceFieldId = bonusIdx > 0 ? numberFields[bonusIdx - 1].Id : null; _plugin.Configuration.Save(); }
+                    { f.BonusSourceFieldId = bonusIdx > 0 ? numberFields[bonusIdx - 1].Id : null; SaveTemplate(partyCode, template); }
                     if (ImGui.IsItemHovered()) ImGui.SetTooltip("Bonus: StatMod of this field adds to bar max");
                     ImGui.SameLine();
                     bool isHp = f.IsHpBar;
                     if (ImGui.Checkbox("HP##fhp", ref isHp))
                     {
                         if (isHp) foreach (var g2 in template.Groups) foreach (var o in g2.Fields) if (o.Id != f.Id) o.IsHpBar = false;
-                        f.IsHpBar = isHp; _plugin.Configuration.Save();
+                        f.IsHpBar = isHp; SaveTemplate(partyCode, template);
                     }
                     if (ImGui.IsItemHovered()) ImGui.SetTooltip("Mark as HP bar (shown in initiative)");
                     ImGui.SameLine();
@@ -472,7 +606,7 @@ public class CharacterSheetWindow : Window, IDisposable
                     if (ImGui.Checkbox("AP##fap", ref isAp))
                     {
                         if (isAp) foreach (var g2 in template.Groups) foreach (var o in g2.Fields) if (o.Id != f.Id) o.IsApBar = false;
-                        f.IsApBar = isAp; _plugin.Configuration.Save();
+                        f.IsApBar = isAp; SaveTemplate(partyCode, template);
                     }
                     if (ImGui.IsItemHovered()) ImGui.SetTooltip("Mark as AP bar (used for exhaustion penalty)");
                     break;
@@ -482,13 +616,13 @@ public class CharacterSheetWindow : Window, IDisposable
             if (fi > 0)
             {
                 if (ImGui.ArrowButton("##fu", ImGuiDir.Up))
-                { (group.Fields[fi - 1], group.Fields[fi]) = (f, group.Fields[fi - 1]); _plugin.Configuration.Save(); }
+                { (group.Fields[fi - 1], group.Fields[fi]) = (f, group.Fields[fi - 1]); SaveTemplate(partyCode, template); }
                 ImGui.SameLine();
             }
             if (fi < group.Fields.Count - 1)
             {
                 if (ImGui.ArrowButton("##fd", ImGuiDir.Down))
-                { (group.Fields[fi], group.Fields[fi + 1]) = (group.Fields[fi + 1], f); _plugin.Configuration.Save(); }
+                { (group.Fields[fi], group.Fields[fi + 1]) = (group.Fields[fi + 1], f); SaveTemplate(partyCode, template); }
                 ImGui.SameLine();
             }
             using (ImRaii.PushColor(ImGuiCol.Button, new Vector4(0.65f, 0.12f, 0.12f, 1f)))
@@ -496,7 +630,6 @@ public class CharacterSheetWindow : Window, IDisposable
                 if (ImGui.SmallButton("✕##fdel")) delFld = fi;
             }
 
-            // Tooltip input on its own line
             using (ImRaii.PushIndent(8f * scale, false))
             using (ImRaii.PushColor(ImGuiCol.Text, new Vector4(0.55f, 0.55f, 0.55f, 1f)))
             {
@@ -506,7 +639,7 @@ public class CharacterSheetWindow : Window, IDisposable
             ImGui.SetNextItemWidth(-1);
             string ftt = f.Tooltip;
             if (ImGui.InputText("##ftt", ref ftt, 256))
-            { f.Tooltip = ftt; _plugin.Configuration.Save(); }
+            { f.Tooltip = ftt; SaveTemplate(partyCode, template); }
             if (ImGui.IsItemHovered())
                 ImGui.SetTooltip("Tooltip shown to players when they hover over this field name.");
 
@@ -514,12 +647,18 @@ public class CharacterSheetWindow : Window, IDisposable
         }
 
         if (delFld >= 0)
-        { group.Fields.RemoveAt(delFld); _plugin.Configuration.Save(); }
+        { group.Fields.RemoveAt(delFld); SaveTemplate(partyCode, template); }
 
         ImGui.Spacing();
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────
+
+    private void SaveTemplate(string partyCode, SheetTemplate template)
+    {
+        _plugin.Configuration.PartyTemplates[partyCode] = template;
+        _plugin.Configuration.Save();
+    }
 
     private static void MaybeTooltip(SheetField f)
     {
@@ -531,24 +670,18 @@ public class CharacterSheetWindow : Window, IDisposable
         ImGui.EndTooltip();
     }
 
-    private bool IsLocalPlayerDm(string pid)
+    private bool IsLocalPlayerDmForParty(string pid, string partyCode)
     {
-        foreach (var (_, members) in _plugin.PartyMembers)
-        {
-            var me = members.FirstOrDefault(m => m.PlayerId == pid);
-            if (me?.Role is PartyRole.Owner or PartyRole.CoDm) return true;
-        }
-        return false;
+        if (!_plugin.PartyMembers.TryGetValue(partyCode, out var members)) return false;
+        var me = members.FirstOrDefault(m => m.PlayerId == pid);
+        return me?.Role is PartyRole.Owner or PartyRole.CoDm;
     }
 
-    private void PublishTemplate(SheetTemplate template, string pid)
+    private void PublishTemplate(SheetTemplate template, string pid, string partyCode)
     {
-        foreach (var party in _plugin.Configuration.Parties)
-        {
-            if (!_plugin.PartyMembers.TryGetValue(party.Code, out var members)) continue;
-            var me = members.FirstOrDefault(m => m.PlayerId == pid);
-            if (me?.Role is not (PartyRole.Owner or PartyRole.CoDm)) continue;
-            Task.Run(() => _plugin.Network.PushSheetTemplateAsync(party.Code, template));
-        }
+        if (!_plugin.PartyMembers.TryGetValue(partyCode, out var members)) return;
+        var me = members.FirstOrDefault(m => m.PlayerId == pid);
+        if (me?.Role is not (PartyRole.Owner or PartyRole.CoDm)) return;
+        Task.Run(() => _plugin.Network.PushSheetTemplateAsync(partyCode, template));
     }
 }

@@ -64,12 +64,14 @@ public sealed class Plugin : IDalamudPlugin
     public readonly Dictionary<string, bool> PartyInitiativeShowHpAp = new();
 
     private bool _autoConnectPending;
+    private bool _partyMigrationPending;
 
     // Dynamic player profile windows (one per remote player ID)
     private readonly Dictionary<string, PlayerSheetWindow>  _playerSheetWindows  = new();
     private readonly Dictionary<string, PlayerSkillsWindow> _playerSkillsWindows = new();
     private readonly HashSet<string> _pendingSheetFetches  = new();
     private readonly HashSet<string> _pendingSkillsFetches = new();
+    private readonly Dictionary<string, string> _pendingSheetParty = new();
     private DateTime _lastProfilePush = DateTime.MinValue;
 
     private HubWindow               HubWindow               { get; init; }
@@ -80,7 +82,7 @@ public sealed class Plugin : IDalamudPlugin
     private TradeNotificationWindow TradeNotificationWindow { get; init; }
     private BagShareInviteWindow    BagShareInviteWindow    { get; init; }
     internal SettingsWindow         SettingsWindow          { get; init; }
-    private CharacterSheetWindow    CharacterSheetWindow    { get; init; }
+    internal CharacterSheetWindow   CharacterSheetWindow    { get; init; }
     private DiceRollerWindow        DiceRollerWindow        { get; init; }
     private SkillsWindow            SkillsWindow            { get; init; }
     private HelpWindow              HelpWindow              { get; init; }
@@ -153,6 +155,7 @@ public sealed class Plugin : IDalamudPlugin
         Network.DiceRollReceived               += OnDiceRollReceived;
 
         MigrateCharacters();
+        _partyMigrationPending = true; // deferred: LocalPlayerId requires framework thread
 
         ContextMenu.OnMenuOpened += OnContextMenuOpened;
 
@@ -255,6 +258,12 @@ public sealed class Plugin : IDalamudPlugin
     {
         BgmService.Update();
 
+        if (_partyMigrationPending && LocalPlayerId != null)
+        {
+            _partyMigrationPending = false;
+            MigrateToPartyCharacters();
+        }
+
         if (_autoConnectPending && !Network.IsConnected)
         {
             string? id = LocalPlayerId;
@@ -272,6 +281,8 @@ public sealed class Plugin : IDalamudPlugin
         if (LocalPlayerId is { } pid)
             GetOrCreateCharacter(pid);
 
+        _partyMigrationPending = true; // re-run on login in case character changed
+
         if (Configuration.ServerUrl == DefaultServerUrl || Network.IsConnected) return;
         string? id = LocalPlayerId;
         if (id == null) return;
@@ -288,7 +299,10 @@ public sealed class Plugin : IDalamudPlugin
     {
         string target = args.Trim().Trim('"');
         if (string.IsNullOrWhiteSpace(target))
-            CharacterSheetWindow.Toggle();
+        {
+            CharacterSheetWindow.OpenPicker();
+            CharacterSheetWindow.IsOpen = true;
+        }
         else
             OpenPlayerSheet(target, ParseDisplayName(target));
     }
@@ -518,6 +532,9 @@ public sealed class Plugin : IDalamudPlugin
         PartyMembers.Remove(code);
         InitiativeStates.Remove(code);
         Configuration.Parties.RemoveAll(p => p.Code == code);
+        Configuration.PartyTemplates.Remove(code);
+        if (Configuration.ActivePartyCode == code)
+            Configuration.ActivePartyCode = null;
         Configuration.Save();
     }
 
@@ -557,6 +574,9 @@ public sealed class Plugin : IDalamudPlugin
         PartyMembers.Remove(code);
         InitiativeStates.Remove(code);
         Configuration.Parties.RemoveAll(p => p.Code == code);
+        Configuration.PartyTemplates.Remove(code);
+        if (Configuration.ActivePartyCode == code)
+            Configuration.ActivePartyCode = null;
         Configuration.Save();
     }
 
@@ -597,8 +617,8 @@ public sealed class Plugin : IDalamudPlugin
         string? pid = LocalPlayerId;
         if (pid == null) return;
 
-        var ch        = GetOrCreateCharacter(pid);
-        var template  = Configuration.ActiveTemplate;
+        var ch        = GetOrCreatePartyCharacter(code, pid);
+        var template  = GetPartyTemplate(code);
         int initBonus = GetInitiativeBonus(ch, template);
         int roll      = new Random().Next(1, 25);
         Task.Run(() => Network.PartySubmitRollAsync(code, roll, initBonus));
@@ -727,9 +747,31 @@ public sealed class Plugin : IDalamudPlugin
         if (dirty) Configuration.Save();
     }
 
+    private void MigrateToPartyCharacters()
+    {
+        if (Configuration.Parties.Count == 0) return;
+        string? pid = LocalPlayerId;
+        if (pid == null) return; // deferred to OnLogin if not yet logged in
+
+        if (!Configuration.Characters.TryGetValue(pid, out var globalCh)) return;
+        if (!globalCh.SheetMigrated) return; // wait for v1 migration first
+
+        bool dirty = false;
+        foreach (var party in Configuration.Parties)
+        {
+            string key = $"{party.Code}/{pid}";
+            if (!Configuration.PartyCharacters.ContainsKey(key))
+            {
+                Configuration.PartyCharacters[key] = DeepCopyCharacter(globalCh);
+                dirty = true;
+            }
+        }
+        if (dirty) Configuration.Save();
+    }
+
     private void OnSheetTemplateReceived(string partyCode, SheetTemplate template)
     {
-        Configuration.ActiveTemplate = template;
+        Configuration.PartyTemplates[partyCode] = template;
         Configuration.Save();
     }
 
@@ -752,19 +794,89 @@ public sealed class Plugin : IDalamudPlugin
         string? pid = LocalPlayerId;
         if (pid == null) return;
         _lastProfilePush = DateTime.UtcNow;
-        var dto = BuildProfileDto(pid, LocalDisplayName, GetOrCreateCharacter(pid));
+        var ch  = Configuration.ActivePartyCode != null
+            ? GetOrCreatePartyCharacter(Configuration.ActivePartyCode, pid)
+            : GetOrCreateCharacter(pid);
+        var dto = BuildProfileDto(pid, LocalDisplayName, ch);
         Task.Run(() => Network.PushProfileAsync(dto));
     }
 
     // ── Player profile windows ────────────────────────────────────────────────
 
-    public void OpenPlayerSheet(string playerId, string displayName)
+    // ── Party-scoped helpers ──────────────────────────────────────────────────
+
+    public void SetActiveParty(string? code)
+    {
+        Configuration.ActivePartyCode = code;
+        Configuration.Save();
+        PushLocalProfile();
+    }
+
+    public RpCharacter GetOrCreatePartyCharacter(string partyCode, string playerId)
+    {
+        string key = $"{partyCode}/{playerId}";
+        if (!Configuration.PartyCharacters.TryGetValue(key, out var ch))
+        {
+            // Seed from global character if present so existing stats carry over
+            if (Configuration.Characters.TryGetValue(playerId, out var global))
+                ch = DeepCopyCharacter(global);
+            else
+                ch = new RpCharacter();
+            Configuration.PartyCharacters[key] = ch;
+            Configuration.Save();
+        }
+        return ch;
+    }
+
+    public SheetTemplate GetPartyTemplate(string partyCode)
+        => Configuration.PartyTemplates.TryGetValue(partyCode, out var t) ? t : SheetTemplate.Default();
+
+    public void OpenSheetForParty(string partyCode)
+    {
+        Configuration.ActivePartyCode = partyCode;
+        Configuration.Save();
+        CharacterSheetWindow.OpenForParty(partyCode);
+        CharacterSheetWindow.IsOpen = true;
+    }
+
+    public void OpenTemplateEditorForParty(string partyCode)
+    {
+        CharacterSheetWindow.OpenTemplateEditorForParty(partyCode);
+        CharacterSheetWindow.IsOpen = true;
+    }
+
+    private static RpCharacter DeepCopyCharacter(RpCharacter src) => new()
+    {
+        StatValues    = new Dictionary<string, int>(src.StatValues),
+        CheckValues   = new Dictionary<string, bool>(src.CheckValues),
+        Skills        = src.Skills.Select(s => new RpSkill
+        {
+            Id                = s.Id,
+            Name              = s.Name,
+            Description       = s.Description,
+            Type              = s.Type,
+            Cooldown          = s.Cooldown,
+            Duration          = s.Duration,
+            CooldownRemaining = 0,
+            DurationRemaining = 0,
+            TriggerOnTurnEnd  = s.TriggerOnTurnEnd,
+            Conditions        = s.Conditions.Select(c => new SkillCondition
+                { FieldId = c.FieldId, Stat = c.Stat, Op = c.Op, Value = c.Value }).ToList(),
+            Effects           = s.Effects.Select(e => new SkillEffect
+                { FieldId = e.FieldId, Target = e.Target, Op = e.Op, Value = e.Value }).ToList(),
+        }).ToList(),
+        SheetMigrated = true,
+    };
+
+    public void OpenPlayerSheet(string playerId, string displayName, string? partyCode = null)
     {
         if (_playerSheetWindows.TryGetValue(playerId, out var existing))
         {
             existing.IsOpen = true;
             return;
         }
+        if (partyCode != null)
+            _pendingSheetParty[playerId] = partyCode;
         _pendingSheetFetches.Add(playerId);
         Task.Run(() => Network.FetchProfileAsync(playerId));
     }
@@ -786,6 +898,7 @@ public sealed class Plugin : IDalamudPlugin
         KnownOnlinePlayers.Add(pid);   // mark as online / profile cached
         bool openSheet  = _pendingSheetFetches.Remove(pid);
         bool openSkills = _pendingSkillsFetches.Remove(pid);
+        _pendingSheetParty.Remove(pid, out string? sheetParty);
 
         if (_playerSheetWindows.TryGetValue(pid, out var existingSheet))
         {
@@ -794,7 +907,7 @@ public sealed class Plugin : IDalamudPlugin
         }
         else if (openSheet)
         {
-            var win = new PlayerSheetWindow(this, profile, ClosePlayerSheetWindow);
+            var win = new PlayerSheetWindow(this, profile, sheetParty, ClosePlayerSheetWindow);
             _playerSheetWindows[pid] = win;
             WindowSystem.AddWindow(win);
             win.IsOpen = true;
@@ -851,10 +964,11 @@ public sealed class Plugin : IDalamudPlugin
         string displayName = pc.Name.ToString();
         if (targetId == LocalPlayerId) return;
 
+        string? ctxParty = Configuration.ActivePartyCode;
         args.AddMenuItem(new MenuItem
         {
             Name      = "Open Character Sheet",
-            OnClicked = _ => OpenPlayerSheet(targetId, displayName),
+            OnClicked = _ => OpenPlayerSheet(targetId, displayName, ctxParty),
         });
         args.AddMenuItem(new MenuItem
         {

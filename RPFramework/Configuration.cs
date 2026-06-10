@@ -28,7 +28,17 @@ public class Configuration : IPluginConfiguration
     // Fellow Adventurers — 1:1 individual sync pairs, stored as "Name@World" IDs
     public List<string> FellowAdventurers { get; set; } = new();
 
-    // Active sheet template — shared with party members when published by a DM.
+    // Per-party sheet templates, keyed by party code.
+    // Populated when a DM publishes a template; falls back to SheetTemplate.Default() if absent.
+    public Dictionary<string, SheetTemplate> PartyTemplates { get; set; } = new();
+
+    // Per-party character data, keyed by "{partyCode}/{playerId}".
+    public Dictionary<string, RpCharacter> PartyCharacters { get; set; } = new();
+
+    // Which party is currently "active" — used by context menu, dice, skills, and profile push.
+    public string? ActivePartyCode { get; set; }
+
+    // Global/fallback template — kept for users not yet in any party and for legacy saves.
     // Newtonsoft.Json is the actual serializer (Dalamud config); use its attributes.
     [Newtonsoft.Json.JsonIgnore]
     public SheetTemplate ActiveTemplate

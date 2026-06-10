@@ -266,6 +266,7 @@ public class HubWindow : Window, IDisposable
             }
 
             bool   inCombat  = plugin.InitiativeStates.ContainsKey(party.Code);
+            bool   isActive  = plugin.Configuration.ActivePartyCode == party.Code;
             string combatTag = "  In Combat";
             float  combatW   = inCombat
                 ? (ImGui.CalcTextSize(combatTag).X + ImGui.GetStyle().ItemSpacing.X)
@@ -276,9 +277,14 @@ public class HubWindow : Window, IDisposable
             string countLabel = totalCount > onlineCount
                 ? $"{party.Name}  [{onlineCount}/{totalCount}]"
                 : $"{party.Name}  [{onlineCount}]";
-            ImGui.TextUnformatted(Truncate(countLabel, maxW));
+            if (isActive)
+                ImGui.TextColored(new Vector4(1f, 0.82f, 0.2f, 1f), Truncate(countLabel, maxW));
+            else
+                ImGui.TextUnformatted(Truncate(countLabel, maxW));
             if (ImGui.IsItemHovered())
-                ImGui.SetTooltip($"{party.Code}   {onlineCount}/{totalCount} online");
+                ImGui.SetTooltip(isActive
+                    ? $"Active party  ·  {party.Code}  ·  {onlineCount}/{totalCount} online"
+                    : $"{party.Code}   {onlineCount}/{totalCount} online");
 
             if (inCombat)
             {
@@ -512,9 +518,9 @@ public class HubWindow : Window, IDisposable
                 {
                     if (MenuButton(FontAwesomeIcon.Bolt, "Join Combat", "jc_" + party.Code))
                     {
-                        var ch        = plugin.GetOrCreateCharacter(localPid);
+                        var ch        = plugin.GetOrCreatePartyCharacter(party.Code, localPid);
                         int roll      = new Random().Next(1, 25);
-                        int initBonus = plugin.GetInitiativeBonus(ch, plugin.Configuration.ActiveTemplate);
+                        int initBonus = plugin.GetInitiativeBonus(ch, plugin.GetPartyTemplate(party.Code));
                         string code   = party.Code;
                         Task.Run(() => plugin.Network.PartySubmitRollAsync(code, roll, initBonus));
                         plugin.InitiativeWindow.IsOpen = true;
@@ -525,6 +531,41 @@ public class HubWindow : Window, IDisposable
                     ImGui.Separator();
                 }
 
+                // Set as Active Party
+                bool alreadyActive = plugin.Configuration.ActivePartyCode == party.Code;
+                if (alreadyActive) ImGui.BeginDisabled();
+                if (MenuButton(FontAwesomeIcon.Star, "Set as Active Party", "pact_" + party.Code))
+                { plugin.SetActiveParty(party.Code); ImGui.CloseCurrentPopup(); }
+                if (alreadyActive)
+                {
+                    ImGui.EndDisabled();
+                    if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+                        ImGui.SetTooltip("Already the active party.");
+                }
+                else
+                {
+                    if (ImGui.IsItemHovered())
+                        ImGui.SetTooltip("Set as active party for dice, skills, and context menus.");
+                }
+
+                // Edit Sheet Template (DM/CoDm only)
+                if (localPid != null)
+                {
+                    plugin.PartyMembers.TryGetValue(party.Code, out var pmembers);
+                    var localM  = pmembers?.FirstOrDefault(m => m.PlayerId == localPid);
+                    bool isDm   = localM?.Role is PartyRole.Owner or PartyRole.CoDm;
+                    if (!isDm) ImGui.BeginDisabled();
+                    if (MenuButton(FontAwesomeIcon.Table, "Edit Sheet Template", "ptmpl_" + party.Code))
+                    { plugin.OpenTemplateEditorForParty(party.Code); ImGui.CloseCurrentPopup(); }
+                    if (!isDm)
+                    {
+                        ImGui.EndDisabled();
+                        if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+                            ImGui.SetTooltip("Only the DM can edit the sheet template.");
+                    }
+                }
+
+                ImGui.Separator();
                 if (MenuButton(FontAwesomeIcon.Copy, "Copy Party Code", "pcp_" + party.Code))
                 { ImGui.SetClipboardText(party.Code); ImGui.CloseCurrentPopup(); }
                 ImGui.Separator();
@@ -549,8 +590,16 @@ public class HubWindow : Window, IDisposable
 
                 ImGui.TextDisabled(member.DisplayName);
                 ImGui.Separator();
-                if (MenuButton(FontAwesomeIcon.Book, "Open Character Sheet", "cs_" + member.PlayerId))
-                { plugin.OpenPlayerSheet(member.PlayerId, member.DisplayName); ImGui.CloseCurrentPopup(); }
+                if (isMe)
+                {
+                    if (MenuButton(FontAwesomeIcon.Book, "Open My Character Sheet", "cs_me_" + member.PlayerId))
+                    { plugin.OpenSheetForParty(_flyoutCode!); ImGui.CloseCurrentPopup(); }
+                }
+                else
+                {
+                    if (MenuButton(FontAwesomeIcon.Book, "Open Character Sheet", "cs_" + member.PlayerId))
+                    { plugin.OpenPlayerSheet(member.PlayerId, member.DisplayName, _flyoutCode); ImGui.CloseCurrentPopup(); }
+                }
                 if (MenuButton(FontAwesomeIcon.Scroll, "Open Skills", "sk_" + member.PlayerId))
                 { plugin.OpenPlayerSkills(member.PlayerId, member.DisplayName); ImGui.CloseCurrentPopup(); }
 

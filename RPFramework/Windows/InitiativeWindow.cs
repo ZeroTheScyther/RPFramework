@@ -348,7 +348,8 @@ public class InitiativeWindow : Window, IDisposable
                 // Only tick own cooldowns/durations if it's actually our turn
                 if (isMyTurn)
                 {
-                    var  ch    = _plugin.GetOrCreateCharacter(pid);
+                    var  ch    = _plugin.GetOrCreatePartyCharacter(state.PartyCode, pid);
+                    var  tmpl  = _plugin.GetPartyTemplate(state.PartyCode);
                     bool dirty = false;
                     foreach (var s in ch.Skills)
                     {
@@ -356,7 +357,6 @@ public class InitiativeWindow : Window, IDisposable
                         if (s.DurationRemaining > 0) { s.DurationRemaining--; dirty = true; }
 
                         // Fire any "Trigger on Turn End" passive effects (respects conditions)
-                        var tmpl = _plugin.Configuration.ActiveTemplate;
                         if (s.Type == SkillType.Passive && s.TriggerOnTurnEnd && s.CooldownRemaining == 0
                             && SkillHelpers.ConditionsMet(s, ch, tmpl))
                         {

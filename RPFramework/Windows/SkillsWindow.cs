@@ -45,7 +45,9 @@ public class SkillsWindow : Window, IDisposable
             return;
         }
 
-        var ch    = plugin.GetOrCreateCharacter(pid);
+        var ch    = plugin.Configuration.ActivePartyCode != null
+            ? plugin.GetOrCreatePartyCharacter(plugin.Configuration.ActivePartyCode, pid)
+            : plugin.GetOrCreateCharacter(pid);
         float scale = ImGuiHelpers.GlobalScale;
 
         if (_selectedIdx >= ch.Skills.Count) _selectedIdx = ch.Skills.Count - 1;
@@ -127,7 +129,9 @@ public class SkillsWindow : Window, IDisposable
         }
 
         var skill    = ch.Skills[_selectedIdx];
-        var template = plugin.Configuration.ActiveTemplate;
+        var template = plugin.Configuration.ActivePartyCode != null
+            ? plugin.GetPartyTemplate(plugin.Configuration.ActivePartyCode)
+            : plugin.Configuration.ActiveTemplate;
         _dirty = false;
 
         if (skill.IsLocked)
