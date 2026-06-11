@@ -8,3 +8,4 @@ release.sh
 depReps/
 *.user
 CLAUDE.md
+.editorconfig
