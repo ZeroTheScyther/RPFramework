@@ -9,3 +9,4 @@ depReps/
 *.user
 CLAUDE.md
 .editorconfig
+.gitignore

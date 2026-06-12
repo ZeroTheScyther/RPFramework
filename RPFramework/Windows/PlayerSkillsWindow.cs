@@ -95,6 +95,9 @@ public class PlayerSkillsWindow : Window, IDisposable
         var template = _plugin.Configuration.ActiveTemplate;
         string GetFieldName(string fid) => template.FindField(fid)?.Name ?? fid;
 
+        string typeBadge = skill.Type == SkillType.Active ? "[Active]" : "[Passive]";
+        ImGui.TextDisabled(typeBadge);
+        ImGui.SameLine();
         ImGui.TextUnformatted(skill.Name);
 
         if (!string.IsNullOrWhiteSpace(skill.Description))
@@ -104,8 +107,6 @@ public class PlayerSkillsWindow : Window, IDisposable
         }
 
         ImGui.Spacing();
-        string typeBadge = skill.Type == SkillType.Active ? "[Active]" : "[Passive]";
-        ImGui.TextDisabled(typeBadge);
         if (skill.Cooldown > 0) { ImGui.SameLine(); ImGui.TextDisabled($"  Cooldown: {skill.Cooldown}t"); }
         if (skill.Duration > 0) { ImGui.SameLine(); ImGui.TextDisabled($"  Duration: {skill.Duration}t"); }
 

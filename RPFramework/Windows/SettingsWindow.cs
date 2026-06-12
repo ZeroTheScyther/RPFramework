@@ -49,6 +49,14 @@ public class SettingsWindow : Window, IDisposable
         if (ImGui.InputText("##serverurl", ref serverUrlBuf, 256))
             urlDirty = true;
 
+        // Inline URL validation so problems surface before hitting Connect
+        var parsedUrl = Services.NetworkService.ValidateServerUrl(serverUrlBuf, out var urlError);
+        if (!string.IsNullOrWhiteSpace(serverUrlBuf) && parsedUrl == null)
+            ImGui.TextColored(new Vector4(1f, 0.4f, 0.4f, 1f), urlError ?? "Invalid URL.");
+        else if (parsedUrl != null && parsedUrl.Scheme == "http")
+            ImGui.TextColored(new Vector4(1f, 0.75f, 0.3f, 1f),
+                "Warning: plain HTTP — traffic to this server is unencrypted.");
+
         bool connected = plugin.Network.IsConnected;
         var  dotColor  = connected
             ? new Vector4(0.3f, 0.85f, 0.3f, 1f)

@@ -30,6 +30,7 @@ public class NetworkService : IDisposable
     // ── Lifecycle events ─────────────────────────────────────────────────────
     /// <summary>Fired (on framework thread) when an initial connection is established.</summary>
     public event Action? Connected;
+    public event Action? Disconnected;
 
     /// <summary>Fired (on framework thread) after an automatic reconnect completes.</summary>
     public event Action? Reconnected;
@@ -58,6 +59,7 @@ public class NetworkService : IDisposable
     public event Action<Guid, string>?                 BagParticipantLeft;     // bagId, playerId
     public event Action<Guid, string, string>?         BagParticipantJoined;   // bagId, playerId, displayName
     public event Action<Guid, string>?                 BagParticipantDeclined; // bagId, playerId
+    public event Action<Guid>?                         BagShareFailed;         // bagId — session not found
 
     // ── Character profiles ────────────────────────────────────────────────────
     public event Action<CharacterProfileDto>? ProfileReceived;
@@ -91,8 +93,33 @@ public class NetworkService : IDisposable
     // Lifecycle
     // ═════════════════════════════════════════════════════════════════════════
 
+    /// <summary>
+    /// Validates a relay server URL: must be an absolute http/https URL (no file paths,
+    /// data URIs, or other schemes). Returns null with a reason when invalid.
+    /// </summary>
+    public static Uri? ValidateServerUrl(string? serverUrl, out string? error)
+    {
+        error = null;
+        if (string.IsNullOrWhiteSpace(serverUrl)) { error = "Server URL is empty."; return null; }
+        if (!Uri.TryCreate(serverUrl.Trim(), UriKind.Absolute, out var uri))
+        { error = "Server URL is not a valid absolute URL."; return null; }
+        if (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps)
+        { error = $"Unsupported URL scheme '{uri.Scheme}' — only http/https are allowed."; return null; }
+        return uri;
+    }
+
     public async Task ConnectAsync(string serverUrl, string playerId, string displayName)
     {
+        var uri = ValidateServerUrl(serverUrl, out var urlError);
+        if (uri == null)
+        {
+            Plugin.Log.Error("[Net] Refusing to connect: {0}", urlError ?? "invalid URL");
+            return;
+        }
+        if (uri.Scheme == Uri.UriSchemeHttp)
+            Plugin.Log.Warning("[Net] Server URL uses plain HTTP — traffic (including party passwords) " +
+                               "is unencrypted. Use an https:// URL if possible.");
+
         await _connectLock.WaitAsync();
         try
         {
@@ -103,8 +130,7 @@ public class NetworkService : IDisposable
 
             _conn = new HubConnectionBuilder()
                 .WithUrl(serverUrl.TrimEnd('/') + "/rphub")
-                .WithAutomaticReconnect(new[] { TimeSpan.Zero, TimeSpan.FromSeconds(2),
-                    TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(15) })
+                .WithAutomaticReconnect(new CappedBackoffRetryPolicy())
                 .Build();
 
             RegisterHandlers();
@@ -118,10 +144,10 @@ public class NetworkService : IDisposable
                 foreach (var id   in _activeBags)  await SafeInvoke("BagShareAccept", id);
                 await Plugin.Framework.RunOnFrameworkThread(() => Reconnected?.Invoke());
             };
-            _conn.Closed += ex =>
+            _conn.Closed += async ex =>
             {
                 if (ex != null) Plugin.Log.Warning(ex, "[Net] Connection closed with error.");
-                return Task.CompletedTask;
+                await Plugin.Framework.RunOnFrameworkThread(() => Disconnected?.Invoke());
             };
 
             await _conn.StartAsync();
@@ -139,6 +165,7 @@ public class NetworkService : IDisposable
         _conn = null;
         _activeRooms.Clear();
         _activeBags.Clear();
+        await Plugin.Framework.RunOnFrameworkThread(() => Disconnected?.Invoke());
     }
 
     public void Dispose()
@@ -198,6 +225,8 @@ public class NetworkService : IDisposable
             (id, pid, name) => Fire(() => BagParticipantJoined?.Invoke(id, pid, name)));
         _conn.On<Guid, string>("OnBagParticipantDeclined",
             (id, pid) => Fire(() => BagParticipantDeclined?.Invoke(id, pid)));
+        _conn.On<Guid>("OnBagShareFailed",
+            id => Fire(() => BagShareFailed?.Invoke(id)));
 
         // Character profiles
         _conn.On<CharacterProfileDto>("OnProfileReceived",
@@ -410,4 +439,22 @@ public class NetworkService : IDisposable
     /// <summary>Fires a callback on the Dalamud framework thread.</summary>
     private static void Fire(Action action)
         => Plugin.Framework.RunOnFrameworkThread(action);
+
+    /// <summary>
+    /// Keeps retrying forever with a capped backoff (0s, 2s, 5s, 15s, then 30s each try)
+    /// instead of giving up after four attempts like the default fixed array did.
+    /// A long server outage then heals without the user manually reconnecting.
+    /// </summary>
+    private sealed class CappedBackoffRetryPolicy : IRetryPolicy
+    {
+        private static readonly TimeSpan[] Steps =
+        {
+            TimeSpan.Zero, TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(15),
+        };
+
+        public TimeSpan? NextRetryDelay(RetryContext retryContext)
+            => retryContext.PreviousRetryCount < Steps.Length
+                ? Steps[retryContext.PreviousRetryCount]
+                : TimeSpan.FromSeconds(30);
+    }
 }

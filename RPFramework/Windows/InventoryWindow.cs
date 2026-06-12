@@ -24,7 +24,9 @@ public class InventoryWindow : Window, IDisposable
     private const int   MinSlots = 35;   // 5 × 7
 
     // Tab state
-    private int selectedTab = 0;
+    private int  selectedTab      = 0;
+    private int  _tabBarVersion   = 0;   // incremented on reorder to force ImGui to rebuild tab order
+    private Guid _pendingSelectId = Guid.Empty; // bag to force-select on the next frame after reorder
 
     // Item context-menu state
     private RpItem? ctxItem;
@@ -42,17 +44,27 @@ public class InventoryWindow : Window, IDisposable
     private int  editAmount;
 
     // Create/Edit item modal
-    private bool   itemModalOpen   = true;
-    private bool   pendingCreateModal;
-    private bool   pendingEditModal;
-    private bool   isEditMode;
-    private int    modalBagIdx;
-    private string modalName      = string.Empty;
-    private string modalDesc      = string.Empty;
-    private uint   modalIconId;
-    private string iconQuery      = string.Empty;
-    private string lastIconQuery  = string.Empty;
+    private bool       itemModalOpen   = true;
+    private bool       pendingCreateModal;
+    private bool       pendingEditModal;
+    private bool       isEditMode;
+    private int        modalBagIdx;
+    private string     modalName      = string.Empty;
+    private string     modalDesc      = string.Empty;
+    private uint       modalIconId;
+    private RpItemType modalItemType  = RpItemType.Normal;
+    private int        modalCapacity  = 10;
+    private string     iconQuery      = string.Empty;
+    private string     lastIconQuery  = string.Empty;
     private List<(string Name, uint IconId)> iconResults = new();
+
+    // Bag item popup state
+    private RpItem?  _openBagItem;
+    private RpBag?   _openBagParent;
+    private bool     _pendingOpenBagPopup;
+    private Vector2  _openBagItemPos;
+    private RpItem?  _bagCtxItem;
+    private bool     _pendingBagCtxMenu;
 
     // Create-bag modal
     private bool   bagModalOpen   = true;
@@ -89,14 +101,15 @@ public class InventoryWindow : Window, IDisposable
     {
         // Flush pending popup opens at the very top of the frame so
         // BeginPopupModal / BeginPopup can find them later in the same frame.
-        if (pendingCreateModal)  { itemModalOpen   = true; ImGui.OpenPopup("##rp_item");   pendingCreateModal  = false; }
-        if (pendingEditModal)    { itemModalOpen   = true; ImGui.OpenPopup("##rp_item");   pendingEditModal    = false; }
-        if (pendingCreateBag)    { bagModalOpen    = true; ImGui.OpenPopup("##rp_bag");    pendingCreateBag    = false; }
-        if (pendingRenameBag)    { renameModalOpen = true; ImGui.OpenPopup("##rp_rename"); pendingRenameBag    = false; }
-        if (pendingAmountModal)  { amountModalOpen = true; ImGui.OpenPopup("##rp_amount"); pendingAmountModal  = false; }
+        if (pendingCreateModal)    { itemModalOpen   = true; ImGui.OpenPopup("##rp_item");   pendingCreateModal    = false; }
+        if (pendingEditModal)      { itemModalOpen   = true; ImGui.OpenPopup("##rp_item");   pendingEditModal      = false; }
+        if (pendingCreateBag)      { bagModalOpen    = true; ImGui.OpenPopup("##rp_bag");    pendingCreateBag      = false; }
+        if (pendingRenameBag)      { renameModalOpen = true; ImGui.OpenPopup("##rp_rename"); pendingRenameBag      = false; }
+        if (pendingAmountModal)    { amountModalOpen = true; ImGui.OpenPopup("##rp_amount"); pendingAmountModal    = false; }
+        if (_pendingOpenBagPopup)  { ImGui.OpenPopup("##rp_bagitem");                        _pendingOpenBagPopup  = false; }
         // Item ctx and tab ctx are opened here (parent scope) to avoid child-window popup scoping issues
-        if (pendingCtxMenu)      { ImGui.OpenPopup("##rp_ctx");    pendingCtxMenu     = false; }
-        if (pendingTabCtxMenu)   { ImGui.OpenPopup("##rp_tabctx"); pendingTabCtxMenu  = false; }
+        if (pendingCtxMenu)        { ImGui.OpenPopup("##rp_ctx");    pendingCtxMenu    = false; }
+        if (pendingTabCtxMenu)     { ImGui.OpenPopup("##rp_tabctx"); pendingTabCtxMenu = false; }
 
         var bags = plugin.Configuration.Bags;
         if (selectedTab >= bags.Count) selectedTab = Math.Max(0, bags.Count - 1);
@@ -133,6 +146,7 @@ public class InventoryWindow : Window, IDisposable
         DrawCreateBagModal(bags);
         DrawRenameBagModal(bags);
         DrawAmountModal(bags);
+        DrawBagItemPopup(bags);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -141,25 +155,35 @@ public class InventoryWindow : Window, IDisposable
 
     private void DrawTabBar(List<RpBag> bags)
     {
-        using var tabBar = ImRaii.TabBar("##rptabs");
+        // The version suffix forces ImGui to rebuild its internal tab order when bags are reordered.
+        // Without this, ImGui preserves its own visual ordering regardless of submission order.
+        using var tabBar = ImRaii.TabBar($"##rptabs{_tabBarVersion}");
         if (!tabBar) return;
 
         for (int i = 0; i < bags.Count; i++)
         {
             var bag = bags[i];
-            using var tab = ImRaii.TabItem($"{bag.Name}##rpt{bag.Id}");
+
+            // Force-select the previously-selected bag on the first frame after a reorder
+            var flags = (_pendingSelectId != Guid.Empty && bag.Id == _pendingSelectId)
+                ? ImGuiTabItemFlags.SetSelected
+                : ImGuiTabItemFlags.None;
+            if (flags == ImGuiTabItemFlags.SetSelected)
+                _pendingSelectId = Guid.Empty;
+
+            bool active = ImGui.BeginTabItem($"{bag.Name}##rpt{bag.Id}", flags);
 
             if (ImGui.IsItemHovered())
             {
                 // Right-click → context popup
                 if (ImGui.IsMouseClicked(ImGuiMouseButton.Right))
                 {
-                    ctxTabBag      = bag;
-                    ctxTabBagIdx   = i;
+                    ctxTabBag         = bag;
+                    ctxTabBagIdx      = i;
                     pendingTabCtxMenu = true;
                 }
 
-                // Tooltip showing share info for shared bags
+                // Tooltip for shared bags
                 if (bag.IsShared)
                 {
                     ImGui.BeginTooltip();
@@ -188,7 +212,43 @@ public class InventoryWindow : Window, IDisposable
                 }
             }
 
-            if (tab) selectedTab = i;
+            if (ImGui.BeginDragDropSource(ImGuiDragDropFlags.None))
+            {
+                byte[] dndPayload = BitConverter.GetBytes(i);
+                ImGui.SetDragDropPayload("RPTAB"u8, dndPayload);
+                ImGui.TextUnformatted(bag.Name);
+                ImGui.EndDragDropSource();
+            }
+
+            if (ImGui.BeginDragDropTarget())
+            {
+                unsafe
+                {
+                    var accepted = ImGui.AcceptDragDropPayload("RPTAB"u8);
+                    if (!accepted.IsNull && accepted.Handle->DataSize == sizeof(int))
+                    {
+                        int srcIdx = BitConverter.ToInt32(accepted.Handle->DataSpan);
+                        if (srcIdx != i)
+                        {
+                            _pendingSelectId = bags[selectedTab].Id;
+                            var moved = bags[srcIdx];
+                            bags.RemoveAt(srcIdx);
+                            bags.Insert(i, moved);
+                            selectedTab = bags.FindIndex(b => b.Id == _pendingSelectId);
+                            if (selectedTab < 0) selectedTab = 0;
+                            _tabBarVersion++;
+                            plugin.Configuration.Save();
+                        }
+                    }
+                }
+                ImGui.EndDragDropTarget();
+            }
+
+            if (active)
+            {
+                selectedTab = i;
+                ImGui.EndTabItem();
+            }
         }
 
         if (ImGui.TabItemButton("+##rpaddtab",
@@ -268,9 +328,20 @@ public class InventoryWindow : Window, IDisposable
             ImGui.InvisibleButton($"##rpib{item.Id}", new Vector2(sz, sz));
         }
 
-        // Amount badge (bottom-right corner)
-        if (item.Amount > 1)
+        if (item.Type == RpItemType.Bag)
         {
+            // Gold border + slot-usage badge for bag items
+            var    dl    = ImGui.GetWindowDrawList();
+            dl.AddRect(pos, pos + new Vector2(sz, sz), 0xFFD4AA00, 0, ImDrawFlags.None, 2f);
+            string usage = $"{item.Contents.Count}/{item.Capacity}";
+            var    tSz   = ImGui.CalcTextSize(usage);
+            var    tPos  = pos + new Vector2(sz - tSz.X - 2f, sz - tSz.Y - 1f);
+            dl.AddText(tPos + new Vector2(1, 1), 0xCC000000, usage);
+            dl.AddText(tPos, 0xFFD4AA00, usage);
+        }
+        else if (item.Amount > 1)
+        {
+            // Amount badge (bottom-right corner) for normal items
             var    dl    = ImGui.GetWindowDrawList();
             string amt   = item.Amount.ToString();
             var    tSz   = ImGui.CalcTextSize(amt);
@@ -284,7 +355,10 @@ public class InventoryWindow : Window, IDisposable
         {
             ImGui.BeginTooltip();
             ImGui.TextUnformatted(item.Name);
-            ImGui.TextDisabled($"x{item.Amount}");
+            if (item.Type == RpItemType.Bag)
+                ImGui.TextDisabled($"Bag  {item.Contents.Count}/{item.Capacity} slots used");
+            else
+                ImGui.TextDisabled($"x{item.Amount}");
             if (!string.IsNullOrWhiteSpace(item.Description))
             {
                 ImGui.Separator();
@@ -328,13 +402,28 @@ public class InventoryWindow : Window, IDisposable
         ImGui.TextDisabled(ctxItem.Name);
         ImGui.Separator();
 
+        // "Open" only for bag items
+        if (ctxItem.Type == RpItemType.Bag)
+        {
+            if (ImGui.MenuItem("Open##rpctxopen"))
+            {
+                _openBagItem        = ctxItem;
+                _openBagParent      = bags[ctxBagIdx];
+                _openBagItemPos     = ImGui.GetMousePos();
+                _pendingOpenBagPopup = true;
+                ImGui.CloseCurrentPopup();
+            }
+            ImGui.Separator();
+        }
+
         if (ImGui.MenuItem("Edit"))
         {
             OpenEdit(ctxItem, ctxBagIdx);
             ImGui.CloseCurrentPopup();
         }
 
-        if (ImGui.MenuItem("Amount"))
+        // Amount only makes sense for normal items
+        if (ctxItem.Type == RpItemType.Normal && ImGui.MenuItem("Amount"))
         {
             editAmount = ctxItem.Amount;
             pendingAmountModal = true;
@@ -343,21 +432,27 @@ public class InventoryWindow : Window, IDisposable
 
         if (ImGui.MenuItem("Copy"))
         {
-            var copyBag = bags[ctxBagIdx];
+            var copyBag    = bags[ctxBagIdx];
             var copiedItem = new RpItem
             {
                 Name        = ctxItem.Name,
                 Description = ctxItem.Description,
                 IconId      = ctxItem.IconId,
                 Amount      = ctxItem.Amount,
+                Type        = ctxItem.Type,
+                Capacity    = ctxItem.Capacity,
+                Contents    = ctxItem.Contents.ConvertAll(c => new RpItem
+                {
+                    Name        = c.Name,
+                    Description = c.Description,
+                    IconId      = c.IconId,
+                    Amount      = c.Amount,
+                }),
             };
             copyBag.Items.Add(copiedItem);
             plugin.Configuration.Save();
             if (copyBag.IsShared)
-            {
-                var dto = new RPFramework.Models.Net.RpItemDto(copiedItem.Id, copiedItem.Name, copiedItem.Description, copiedItem.IconId, copiedItem.Amount);
-                plugin.PublishBagOp(copyBag.Id, RPFramework.Models.Net.BagOpType.AddItem, item: dto);
-            }
+                plugin.PublishBagOp(copyBag.Id, RPFramework.Models.Net.BagOpType.AddItem, item: Plugin.ItemToDto(copiedItem));
             ImGui.CloseCurrentPopup();
         }
 
@@ -370,8 +465,8 @@ public class InventoryWindow : Window, IDisposable
                 any = true;
                 if (ImGui.MenuItem(bags[i].Name))
                 {
-                    var srcBag  = bags[ctxBagIdx];
-                    var destBag = bags[i];
+                    var srcBag    = bags[ctxBagIdx];
+                    var destBag   = bags[i];
                     var movedItem = ctxItem!;
                     srcBag.Items.Remove(movedItem);
                     destBag.Items.Add(movedItem);
@@ -379,16 +474,42 @@ public class InventoryWindow : Window, IDisposable
                     if (srcBag.IsShared)
                         plugin.PublishBagOp(srcBag.Id, RPFramework.Models.Net.BagOpType.RemoveItem, itemId: movedItem.Id);
                     if (destBag.IsShared)
-                    {
-                        var dto = new RPFramework.Models.Net.RpItemDto(movedItem.Id, movedItem.Name, movedItem.Description, movedItem.IconId, movedItem.Amount);
-                        plugin.PublishBagOp(destBag.Id, RPFramework.Models.Net.BagOpType.AddItem, item: dto);
-                    }
+                        plugin.PublishBagOp(destBag.Id, RPFramework.Models.Net.BagOpType.AddItem, item: Plugin.ItemToDto(movedItem));
                     ctxItem = null;
                     ImGui.CloseCurrentPopup();
                 }
             }
             if (!any) ImGui.TextDisabled("No other bags");
             ImGui.EndMenu();
+        }
+
+        // "Put in bag" — for normal items only, when a bag item with free slots exists
+        if (ctxItem?.Type == RpItemType.Normal)
+        {
+            var bagItemsWithSpace = bags[ctxBagIdx].Items
+                .FindAll(b => b.Type == RpItemType.Bag && b.Contents.Count < b.Capacity && b != ctxItem);
+            if (bagItemsWithSpace.Count > 0 && ImGui.BeginMenu("Put in bag##rpputinbag"))
+            {
+                foreach (var bagItem in bagItemsWithSpace)
+                {
+                    if (ImGui.MenuItem($"{bagItem.Name}  ({bagItem.Contents.Count}/{bagItem.Capacity})##rpputin{bagItem.Id}"))
+                    {
+                        var srcBag    = bags[ctxBagIdx];
+                        var movedItem = ctxItem!;
+                        srcBag.Items.Remove(movedItem);
+                        bagItem.Contents.Add(movedItem);
+                        plugin.Configuration.Save();
+                        if (srcBag.IsShared)
+                        {
+                            plugin.PublishBagOp(srcBag.Id, RPFramework.Models.Net.BagOpType.RemoveItem, itemId: movedItem.Id);
+                            plugin.PublishBagOp(srcBag.Id, RPFramework.Models.Net.BagOpType.UpdateItem, item: Plugin.ItemToDto(bagItem));
+                        }
+                        ctxItem = null;
+                        ImGui.CloseCurrentPopup();
+                    }
+                }
+                ImGui.EndMenu();
+            }
         }
 
         ImGui.Separator();
@@ -423,7 +544,7 @@ public class InventoryWindow : Window, IDisposable
         if (ImGui.MenuItem("Trade##rptrade"))
         {
             var item = ctxItem!;
-            var dto  = new RpItemDto(item.Id, item.Name, item.Description, item.IconId, item.Amount);
+            var dto  = Plugin.ItemToDto(item);
             Task.Run(() => plugin.Network.SendTradeOffer(targetId!, dto, isCopy: false));
             // Optimistically mark as pending removal — actual removal happens on OnTradeAccepted
             ctxItem   = null;
@@ -435,7 +556,7 @@ public class InventoryWindow : Window, IDisposable
         if (ImGui.MenuItem("Send a Copy##rpsendcopy"))
         {
             var item = ctxItem!;
-            var dto  = new RpItemDto(item.Id, item.Name, item.Description, item.IconId, item.Amount);
+            var dto  = Plugin.ItemToDto(item);
             Task.Run(() => plugin.Network.SendTradeOffer(targetId!, dto, isCopy: true));
             ctxItem   = null;
             ImGui.CloseCurrentPopup();
@@ -462,11 +583,44 @@ public class InventoryWindow : Window, IDisposable
         if (ctxTabBag == null) return;
         if (!ImGui.BeginPopup("##rp_tabctx")) return;
 
-        // Capture locally — CloseCurrentPopup() is deferred, so code after it still runs
-        // and ctxTabBag must not be nulled mid-popup.
+        // Capture the bag object locally. Use IndexOf to get its CURRENT position in the
+        // list — ctxTabBagIdx may be stale if the list changed since the right-click.
         var bag = ctxTabBag;
+        int bagIdx = bags.IndexOf(bag);
+        if (bagIdx < 0) { ImGui.EndPopup(); ctxTabBag = null; return; }
 
         ImGui.TextDisabled(bag.Name);
+        ImGui.Separator();
+
+        bool canMoveLeft  = bagIdx > 0;
+        bool canMoveRight = bagIdx < bags.Count - 1;
+
+        if (!canMoveLeft) ImGui.BeginDisabled();
+        if (ImGui.MenuItem("Move left##rptableft"))
+        {
+            _pendingSelectId = bags[selectedTab].Id;
+            (bags[bagIdx - 1], bags[bagIdx]) = (bags[bagIdx], bags[bagIdx - 1]);
+            if (selectedTab == bagIdx) selectedTab = bagIdx - 1;
+            else if (selectedTab == bagIdx - 1) selectedTab = bagIdx;
+            _tabBarVersion++;
+            plugin.Configuration.Save();
+            ImGui.CloseCurrentPopup();
+        }
+        if (!canMoveLeft) ImGui.EndDisabled();
+
+        if (!canMoveRight) ImGui.BeginDisabled();
+        if (ImGui.MenuItem("Move right##rptabright"))
+        {
+            _pendingSelectId = bags[selectedTab].Id;
+            (bags[bagIdx], bags[bagIdx + 1]) = (bags[bagIdx + 1], bags[bagIdx]);
+            if (selectedTab == bagIdx) selectedTab = bagIdx + 1;
+            else if (selectedTab == bagIdx + 1) selectedTab = bagIdx;
+            _tabBarVersion++;
+            plugin.Configuration.Save();
+            ImGui.CloseCurrentPopup();
+        }
+        if (!canMoveRight) ImGui.EndDisabled();
+
         ImGui.Separator();
 
         if (ImGui.MenuItem("Rename"))
@@ -493,7 +647,7 @@ public class InventoryWindow : Window, IDisposable
                     bag.Id,
                     bag.Name,
                     plugin.LocalPlayerId ?? string.Empty,
-                    bag.Items.ConvertAll(i => new RpItemDto(i.Id, i.Name, i.Description, i.IconId, i.Amount)),
+                    bag.Items.ConvertAll(Plugin.ItemToDto),
                     0L,
                     bag.Gil);
                 bag.SharedOwner = plugin.LocalPlayerId;
@@ -540,7 +694,7 @@ public class InventoryWindow : Window, IDisposable
         if (!canDeleteBag) ImGui.BeginDisabled();
         if (ImGui.MenuItem("Delete"))
         {
-            bags.RemoveAt(ctxTabBagIdx);
+            bags.Remove(bag);
             if (selectedTab >= bags.Count) selectedTab = bags.Count - 1;
             plugin.Configuration.Save();
             ImGui.CloseCurrentPopup();
@@ -558,22 +712,26 @@ public class InventoryWindow : Window, IDisposable
 
     private void OpenCreate(int bagIdx)
     {
-        isEditMode  = false;
-        modalBagIdx = bagIdx;
-        modalName   = string.Empty;
-        modalDesc   = string.Empty;
-        modalIconId = 0;
+        isEditMode     = false;
+        modalBagIdx    = bagIdx;
+        modalName      = string.Empty;
+        modalDesc      = string.Empty;
+        modalIconId    = 0;
+        modalItemType  = RpItemType.Normal;
+        modalCapacity  = 10;
         ResetIconSearch();
         pendingCreateModal = true;
     }
 
     private void OpenEdit(RpItem item, int bagIdx)
     {
-        isEditMode  = true;
-        modalBagIdx = bagIdx;
-        modalName   = item.Name;
-        modalDesc   = item.Description;
-        modalIconId = item.IconId;
+        isEditMode     = true;
+        modalBagIdx    = bagIdx;
+        modalName      = item.Name;
+        modalDesc      = item.Description;
+        modalIconId    = item.IconId;
+        modalItemType  = item.Type;
+        modalCapacity  = item.Capacity;
         ResetIconSearch();
         pendingEditModal = true;
     }
@@ -597,6 +755,24 @@ public class InventoryWindow : Window, IDisposable
             return;
 
         ImGui.TextUnformatted(isEditMode ? "Edit Item" : "Create New Item");
+        ImGui.Separator();
+
+        // Type selector
+        ImGui.TextUnformatted("Type");
+        ImGui.SetNextItemWidth(-1);
+        int typeIdx = (int)modalItemType;
+        if (ImGui.Combo("##rpmodaltype", ref typeIdx, new[] { "Normal", "Bag" }, 2))
+            modalItemType = (RpItemType)typeIdx;
+
+        if (modalItemType == RpItemType.Bag)
+        {
+            ImGui.TextUnformatted("Capacity");
+            ImGui.SetNextItemWidth(120 * ImGuiHelpers.GlobalScale);
+            ImGui.InputInt("##rpmodalcap", ref modalCapacity, 1, 4);
+            if (modalCapacity < 1)   modalCapacity = 1;
+            if (modalCapacity > 256) modalCapacity = 256;
+        }
+
         ImGui.Separator();
 
         // Name
@@ -695,12 +871,11 @@ public class InventoryWindow : Window, IDisposable
                 ctxItem.Name        = modalName.Trim();
                 ctxItem.Description = modalDesc.Trim();
                 ctxItem.IconId      = modalIconId;
+                ctxItem.Type        = modalItemType;
+                ctxItem.Capacity    = modalCapacity;
                 plugin.Configuration.Save();
                 if (modalBag.IsShared)
-                {
-                    var dto = new RPFramework.Models.Net.RpItemDto(ctxItem.Id, ctxItem.Name, ctxItem.Description, ctxItem.IconId, ctxItem.Amount);
-                    plugin.PublishBagOp(modalBag.Id, RPFramework.Models.Net.BagOpType.UpdateItem, item: dto);
-                }
+                    plugin.PublishBagOp(modalBag.Id, RPFramework.Models.Net.BagOpType.UpdateItem, item: Plugin.ItemToDto(ctxItem));
             }
             else
             {
@@ -710,14 +885,13 @@ public class InventoryWindow : Window, IDisposable
                     Description = modalDesc.Trim(),
                     IconId      = modalIconId,
                     Amount      = 1,
+                    Type        = modalItemType,
+                    Capacity    = modalCapacity,
                 };
                 modalBag.Items.Add(newItem);
                 plugin.Configuration.Save();
                 if (modalBag.IsShared)
-                {
-                    var dto = new RPFramework.Models.Net.RpItemDto(newItem.Id, newItem.Name, newItem.Description, newItem.IconId, newItem.Amount);
-                    plugin.PublishBagOp(modalBag.Id, RPFramework.Models.Net.BagOpType.AddItem, item: dto);
-                }
+                    plugin.PublishBagOp(modalBag.Id, RPFramework.Models.Net.BagOpType.AddItem, item: Plugin.ItemToDto(newItem));
             }
             ImGui.CloseCurrentPopup();
         }
@@ -840,10 +1014,7 @@ public class InventoryWindow : Window, IDisposable
                 plugin.Configuration.Save();
                 var amtBag = bags[ctxBagIdx];
                 if (amtBag.IsShared)
-                {
-                    var dto = new RPFramework.Models.Net.RpItemDto(ctxItem.Id, ctxItem.Name, ctxItem.Description, ctxItem.IconId, ctxItem.Amount);
-                    plugin.PublishBagOp(amtBag.Id, RPFramework.Models.Net.BagOpType.UpdateItem, item: dto);
-                }
+                    plugin.PublishBagOp(amtBag.Id, RPFramework.Models.Net.BagOpType.UpdateItem, item: Plugin.ItemToDto(ctxItem));
             }
             ImGui.CloseCurrentPopup();
         }
@@ -888,5 +1059,154 @@ public class InventoryWindow : Window, IDisposable
                 results.Add((name, row.Icon));
         }
         return results;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Bag item popup  (sub-inventory for RpItemType.Bag items)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private void DrawBagItemPopup(List<RpBag> bags)
+    {
+        if (_openBagItem == null) return;
+
+        float scale    = ImGuiHelpers.GlobalScale;
+        float sz       = SlotPx * scale;
+        float pad      = PadPx  * scale;
+        int   capacity = Math.Max(1, _openBagItem.Capacity);
+        int   rows     = (capacity + Cols - 1) / Cols;
+        float gridH    = Math.Min(rows, 7) * (sz + pad) + pad;
+        float popupW   = Cols * (sz + pad) + ImGui.GetStyle().WindowPadding.X * 2 + pad;
+
+        ImGui.SetNextWindowPos(_openBagItemPos, ImGuiCond.Appearing);
+        ImGui.SetNextWindowSize(new Vector2(popupW, 0), ImGuiCond.Appearing);
+
+        if (!ImGui.BeginPopup("##rp_bagitem", ImGuiWindowFlags.AlwaysAutoResize)) return;
+
+        // Header
+        ImGui.TextUnformatted(_openBagItem.Name);
+        ImGui.SameLine();
+        ImGui.TextDisabled($"  {_openBagItem.Contents.Count}/{capacity} slots");
+        ImGui.Separator();
+
+        // Scrollable slot grid
+        using (var child = ImRaii.Child("##rpbagpopupgrid", new Vector2(-1, gridH), false,
+               ImGuiWindowFlags.NoScrollbar | (rows > 7 ? ImGuiWindowFlags.None : ImGuiWindowFlags.NoScrollbar)))
+        {
+            if (child)
+            {
+                for (int i = 0; i < capacity; i++)
+                {
+                    if (i % Cols != 0) ImGui.SameLine(0, pad);
+                    if (i < _openBagItem.Contents.Count)
+                        DrawBagContentSlot(i, sz);
+                    else
+                        DrawEmptySlot(sz);
+                }
+            }
+        }
+
+        ImGui.Separator();
+        ImGui.TextDisabled("Right-click items to take out or discard.");
+
+        // Context menu for items inside this bag — must be opened inside the popup scope
+        if (_pendingBagCtxMenu) { ImGui.OpenPopup("##rp_bagitemctx"); _pendingBagCtxMenu = false; }
+        DrawBagItemContextMenu(bags);
+
+        ImGui.EndPopup();
+    }
+
+    private void DrawBagContentSlot(int idx, float sz)
+    {
+        var item = _openBagItem!.Contents[idx];
+        var pos  = ImGui.GetCursorScreenPos();
+
+        ImGui.PushID($"##rpbcs{idx}");
+
+        if (item.IconId > 0)
+        {
+            var tex  = Plugin.TextureProvider.GetFromGameIcon(new GameIconLookup(item.IconId));
+            var wrap = tex.GetWrapOrEmpty();
+            ImGui.ImageButton(wrap.Handle, new Vector2(sz, sz), Vector2.Zero, Vector2.One, 0, Vector4.Zero);
+        }
+        else
+        {
+            var dl = ImGui.GetWindowDrawList();
+            dl.AddRectFilled(pos, pos + new Vector2(sz, sz), 0xFF3D3D3D);
+            dl.AddRect(pos,       pos + new Vector2(sz, sz), 0xFF606060);
+            ImGui.InvisibleButton($"##rpbcib{idx}", new Vector2(sz, sz));
+        }
+
+        if (item.Amount > 1)
+        {
+            var    dl   = ImGui.GetWindowDrawList();
+            string amt  = item.Amount.ToString();
+            var    tSz  = ImGui.CalcTextSize(amt);
+            var    tPos = pos + new Vector2(sz - tSz.X - 2f, sz - tSz.Y - 1f);
+            dl.AddText(tPos + new Vector2(1, 1), 0xCC000000, amt);
+            dl.AddText(tPos, 0xFFFFFFFF, amt);
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.BeginTooltip();
+            ImGui.TextUnformatted(item.Name);
+            ImGui.TextDisabled($"x{item.Amount}");
+            if (!string.IsNullOrWhiteSpace(item.Description))
+            {
+                ImGui.Separator();
+                ImGui.PushTextWrapPos(240f * ImGuiHelpers.GlobalScale);
+                ImGui.TextUnformatted(item.Description);
+                ImGui.PopTextWrapPos();
+            }
+            ImGui.EndTooltip();
+
+            if (ImGui.IsMouseClicked(ImGuiMouseButton.Right))
+            {
+                _bagCtxItem       = item;
+                _pendingBagCtxMenu = true;
+            }
+        }
+
+        ImGui.PopID();
+    }
+
+    private void DrawBagItemContextMenu(List<RpBag> bags)
+    {
+        if (_bagCtxItem == null) return;
+        if (!ImGui.BeginPopup("##rp_bagitemctx")) return;
+
+        ImGui.TextDisabled(_bagCtxItem.Name);
+        ImGui.Separator();
+
+        if (ImGui.MenuItem("Take out##rpbagctxtakeout"))
+        {
+            if (_openBagItem != null && _openBagParent != null)
+            {
+                _openBagItem.Contents.Remove(_bagCtxItem!);
+                _openBagParent.Items.Add(_bagCtxItem!);
+                plugin.Configuration.Save();
+                if (_openBagParent.IsShared)
+                    plugin.PublishBagOp(_openBagParent.Id, RPFramework.Models.Net.BagOpType.UpdateItem,
+                        item: Plugin.ItemToDto(_openBagItem));
+            }
+            _bagCtxItem = null;
+            ImGui.CloseCurrentPopup();
+        }
+
+        if (ImGui.MenuItem("Discard##rpbagctxdiscard"))
+        {
+            if (_openBagItem != null && _openBagParent != null)
+            {
+                _openBagItem.Contents.Remove(_bagCtxItem!);
+                plugin.Configuration.Save();
+                if (_openBagParent.IsShared)
+                    plugin.PublishBagOp(_openBagParent.Id, RPFramework.Models.Net.BagOpType.UpdateItem,
+                        item: Plugin.ItemToDto(_openBagItem));
+            }
+            _bagCtxItem = null;
+            ImGui.CloseCurrentPopup();
+        }
+
+        ImGui.EndPopup();
     }
 }

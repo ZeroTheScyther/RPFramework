@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using NAudio.Wave;
@@ -56,6 +57,44 @@ public class BgmService : IDisposable
     private          CancellationTokenSource? downloadCts;
 
     private readonly object playLock = new();
+
+    // yt-dlp gets at most this long per download before being killed
+    private static readonly TimeSpan DownloadTimeout = TimeSpan.FromMinutes(10);
+
+    // YouTube video IDs: URL-safe base64-ish, ~11 chars. Anything else never reaches
+    // the filesystem path or the yt-dlp command line.
+    private static readonly Regex VideoIdPattern = new(@"^[A-Za-z0-9_-]{6,16}$", RegexOptions.Compiled);
+
+    /// <summary>
+    /// Returns true when the URL is a youtube.com / youtu.be link (or a bare video ID).
+    /// Used before anything is handed to yt-dlp or the metadata client.
+    /// </summary>
+    public static bool IsAllowedYoutubeUrl(string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url) || url.Length > 512) return false;
+        if (VideoIdPattern.IsMatch(url)) return true;
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)) return false;
+        if (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps) return false;
+        string host = uri.Host.ToLowerInvariant();
+        return host is "youtube.com" or "www.youtube.com" or "m.youtube.com"
+                    or "music.youtube.com" or "youtu.be" or "www.youtu.be";
+    }
+
+    /// <summary>
+    /// Extracts and validates the video ID. Returns null when the URL is not an allowed
+    /// YouTube link or the ID contains unexpected characters (path-traversal defense:
+    /// the ID becomes part of the cache file name).
+    /// </summary>
+    private static string? TryGetVideoId(string url)
+    {
+        if (!IsAllowedYoutubeUrl(url)) return null;
+        try
+        {
+            string id = VideoId.Parse(url).Value;
+            return VideoIdPattern.IsMatch(id) ? id : null;
+        }
+        catch { return null; }
+    }
 
     // ── Public state ──────────────────────────────────────────────────────────
 
@@ -344,7 +383,13 @@ public class BgmService : IDisposable
     {
         try
         {
-            string videoId   = VideoId.Parse(youtubeUrl).Value;
+            // Whitelist + ID-shape validation — nothing else reaches yt-dlp or the cache path
+            string? videoId = TryGetVideoId(youtubeUrl);
+            if (videoId == null)
+            {
+                loadError = "Only youtube.com / youtu.be links are supported.";
+                return null;
+            }
             string cacheBase = Path.Combine(cacheDir, videoId);
 
             // Return cached file if present
@@ -354,13 +399,15 @@ public class BgmService : IDisposable
                 if (File.Exists(cached)) { downloadProgress = 1f; return cached; }
             }
 
-            // Download with yt-dlp; output template keeps video ID as filename
+            // Download with yt-dlp; output template keeps video ID as filename.
+            // --max-filesize caps disk usage per track; "--" stops option parsing
+            // so the (already validated) ID can never be read as a flag.
             string outTemplate = cacheBase + ".%(ext)s";
             var psi = new ProcessStartInfo
             {
                 FileName               = ytDlpExe,
                 // Prefer m4a (plays well with MediaFoundationReader); fall back to best audio
-                Arguments              = $"--no-playlist -f \"bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio\" --no-part -o \"{outTemplate}\" -- \"{videoId}\"",
+                Arguments              = $"--no-playlist --max-filesize 200M -f \"bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio\" --no-part -o \"{outTemplate}\" -- \"{videoId}\"",
                 RedirectStandardOutput = true,
                 RedirectStandardError  = true,
                 UseShellExecute        = false,
@@ -383,7 +430,21 @@ public class BgmService : IDisposable
 
             proc.Start();
             proc.BeginOutputReadLine();
-            await proc.WaitForExitAsync(ct);
+
+            // Hard timeout so a hung yt-dlp can't linger forever
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeoutCts.CancelAfter(DownloadTimeout);
+            try
+            {
+                await proc.WaitForExitAsync(timeoutCts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                try { proc.Kill(entireProcessTree: true); } catch { }
+                if (ct.IsCancellationRequested) throw;   // song changed — propagate
+                loadError = "Download timed out.";
+                return null;
+            }
 
             if (proc.ExitCode != 0) return null;
 
@@ -402,6 +463,7 @@ public class BgmService : IDisposable
 
     public static async Task<string> GetTitleAsync(string youtubeUrl)
     {
+        if (!IsAllowedYoutubeUrl(youtubeUrl)) return "Unknown";
         try
         {
             var video = await Youtube.Videos.GetAsync(youtubeUrl);
@@ -416,7 +478,9 @@ public class BgmService : IDisposable
     {
         try
         {
-            string cacheBase = Path.Combine(cacheDir, VideoId.Parse(youtubeUrl).Value);
+            string? videoId = TryGetVideoId(youtubeUrl);
+            if (videoId == null) return;
+            string cacheBase = Path.Combine(cacheDir, videoId);
             foreach (string ext in AudioExts) { string p = cacheBase + ext; if (File.Exists(p)) File.Delete(p); }
         }
         catch { }

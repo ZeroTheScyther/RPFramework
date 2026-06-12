@@ -91,9 +91,19 @@ public sealed class Plugin : IDalamudPlugin
 
     public Plugin()
     {
-        Configuration = PluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
+        // A corrupted / hand-edited config file must never prevent the plugin from loading
+        Configuration? loaded = null;
+        try { loaded = PluginInterface.GetPluginConfig() as Configuration; }
+        catch (Exception ex) { Log.Error(ex, "Failed to load configuration — starting with defaults."); }
+        Configuration = loaded ?? new Configuration();
+        ValidateConfiguration(Configuration);
+
         if (Configuration.Bags.Count == 0)
             Configuration.Bags.Add(new RpBag { Name = "Bag" });
+
+        // Shared bags are transient — purge any leftover data from previous sessions.
+        // They are re-populated by the server via OnBagStateReceived after connecting.
+        ClearSharedBagData();
 
         string bgmCacheDir = Path.Combine(PluginInterface.GetPluginConfigDirectory(), "bgm_cache");
         BgmService = new BgmService(bgmCacheDir);
@@ -128,6 +138,7 @@ public sealed class Plugin : IDalamudPlugin
         // Wire up network events
         Network.Connected              += OnConnected;
         Network.Reconnected            += OnConnected;
+        Network.Disconnected           += OnDisconnected;
         Network.TradeOfferReceived     += OnTradeOfferReceived;
         Network.TradeItemReceived      += OnTradeItemReceived;
         Network.TradeAccepted          += OnTradeAccepted;
@@ -135,6 +146,7 @@ public sealed class Plugin : IDalamudPlugin
         Network.BagOperationApplied    += OnBagOperationApplied;
         Network.BagDissolved           += OnBagDissolved;
         Network.BagStateReceived       += OnBagStateReceived;
+        Network.BagShareFailed         += OnBagShareFailed;
         Network.BagParticipantJoined   += OnBagParticipantJoined;
         Network.BagParticipantLeft     += OnBagParticipantLeft;
         Network.ProfileReceived        += OnProfileReceived;
@@ -187,6 +199,7 @@ public sealed class Plugin : IDalamudPlugin
     {
         Network.Connected              -= OnConnected;
         Network.Reconnected            -= OnConnected;
+        Network.Disconnected           -= OnDisconnected;
         Network.TradeOfferReceived     -= OnTradeOfferReceived;
         Network.TradeItemReceived      -= OnTradeItemReceived;
         Network.TradeAccepted          -= OnTradeAccepted;
@@ -194,6 +207,7 @@ public sealed class Plugin : IDalamudPlugin
         Network.BagOperationApplied    -= OnBagOperationApplied;
         Network.BagDissolved           -= OnBagDissolved;
         Network.BagStateReceived       -= OnBagStateReceived;
+        Network.BagShareFailed         -= OnBagShareFailed;
         Network.BagParticipantJoined   -= OnBagParticipantJoined;
         Network.BagParticipantLeft     -= OnBagParticipantLeft;
         Network.ProfileReceived        -= OnProfileReceived;
@@ -329,6 +343,26 @@ public sealed class Plugin : IDalamudPlugin
 
     // ── Network lifecycle ─────────────────────────────────────────────────────
 
+    private void OnDisconnected() => ClearSharedBagData();
+
+    /// <summary>
+    /// Removes shared bag data from local config without touching the SharedBagRef list.
+    /// The refs are needed to re-join after reconnect; the server re-sends bag contents via OnBagStateReceived.
+    /// </summary>
+    private void ClearSharedBagData()
+    {
+        var sharedIds = Configuration.Bags
+            .Where(b => b.IsShared)
+            .Select(b => b.Id)
+            .ToList();
+        if (sharedIds.Count == 0) return;
+
+        Configuration.Bags.RemoveAll(b => b.IsShared);
+        foreach (var id in sharedIds)
+            BagParticipants.Remove(id);
+        Configuration.Save();
+    }
+
     /// <summary>
     /// Called on both initial connect and reconnect.
     /// Pushes local profile so party members get an immediate update.
@@ -338,6 +372,15 @@ public sealed class Plugin : IDalamudPlugin
         // Push profile immediately — bypasses the throttle for the first push after connect
         _lastProfilePush = DateTime.MinValue;
         PushLocalProfile();
+
+        // Re-join shared bags from persisted config. _activeBags is empty after a plugin
+        // reload, so the NetworkService reconnect handler skips them. AcceptBagShare is
+        // idempotent (HashSet add + server group join), so this is safe on normal reconnects too.
+        foreach (var sharedRef in Configuration.SharedBags)
+        {
+            var bagId = sharedRef.BagId;
+            Task.Run(() => Network.AcceptBagShare(bagId));
+        }
     }
 
     // ── Trade event handlers ──────────────────────────────────────────────────
@@ -368,15 +411,18 @@ public sealed class Plugin : IDalamudPlugin
 
     private void OnTradeItemReceived(Guid offerId, RpItemDto item, bool isCopy)
     {
+        if (item == null)
+        {
+            Log.Warning("[Net] Discarded malformed trade item payload from server.");
+            return;
+        }
         if (Configuration.Bags.Count > 0)
         {
-            Configuration.Bags[0].Items.Add(new RpItem
-            {
-                Name        = item.Name,
-                Description = item.Description,
-                IconId      = item.IconId,
-                Amount      = item.Amount,
-            });
+            // Depth/length-guarded conversion; new Id so a duplicate-Id payload
+            // can't collide with an item we already own
+            var received = DtoToItem(item);
+            received.Id = Guid.NewGuid();
+            Configuration.Bags[0].Items.Add(received);
             Configuration.Save();
         }
     }
@@ -411,6 +457,9 @@ public sealed class Plugin : IDalamudPlugin
                     existing.Description = op.Item.Description;
                     existing.IconId      = op.Item.IconId;
                     existing.Amount      = op.Item.Amount;
+                    existing.Type        = op.Item.Type;
+                    existing.Capacity    = op.Item.Capacity;
+                    existing.Contents    = op.Item.Contents?.ConvertAll(DtoToItem) ?? new();
                 }
                 break;
             case BagOpType.Rename when op.NewName != null:
@@ -449,14 +498,56 @@ public sealed class Plugin : IDalamudPlugin
 
     private void OnBagStateReceived(SharedBagDto dto)
     {
+        if (dto == null || dto.BagId == Guid.Empty || dto.Items == null
+            || dto.Items.Count > MaxItemsPerLevel)
+        {
+            Log.Warning("[Net] Discarded malformed shared-bag payload from server.");
+            return;
+        }
+
         var bag = Configuration.Bags.Find(b => b.Id == dto.BagId);
-        if (bag == null) return;
+        if (bag == null)
+        {
+            // First time seeing this bag this session — create it from server data
+            bag = new RpBag
+            {
+                Id          = dto.BagId,
+                Name        = dto.Name,
+                SharedOwner = dto.OwnerPlayerId,
+            };
+            Configuration.Bags.Add(bag);
+        }
+
         bag.Items.Clear();
         bag.Items.AddRange(dto.Items.ConvertAll(DtoToItem));
         bag.Gil = dto.Gil;
+
         var sharedRef = Configuration.SharedBags.Find(r => r.BagId == dto.BagId);
         if (sharedRef != null) sharedRef.Version = dto.Version;
         Configuration.Save();
+    }
+
+    private void OnBagShareFailed(Guid bagId)
+    {
+        bool dirty = false;
+
+        // Remove the pending/stale shared-bag reference.
+        dirty |= Configuration.SharedBags.RemoveAll(r => r.BagId == bagId) > 0;
+
+        // If we were the owner attempting to share (bag still exists locally),
+        // clear SharedOwner so ClearSharedBagData() won't delete the bag on disconnect.
+        var bag = Configuration.Bags.Find(b => b.Id == bagId);
+        if (bag != null && bag.SharedOwner != null)
+        {
+            bag.SharedOwner = null;
+            dirty = true;
+        }
+
+        if (dirty)
+        {
+            Configuration.Save();
+            Log.Warning("Bag share failed for {BagId}: target is not connected to the relay.", bagId);
+        }
     }
 
     // ── Party event handlers ──────────────────────────────────────────────────
@@ -620,6 +711,8 @@ public sealed class Plugin : IDalamudPlugin
         var ch        = GetOrCreatePartyCharacter(code, pid);
         var template  = GetPartyTemplate(code);
         int initBonus = GetInitiativeBonus(ch, template);
+        // The d24 is rolled server-side (anti-cheat); the roll argument exists only
+        // for wire compatibility and is ignored by current servers.
         int roll      = new Random().Next(1, 25);
         Task.Run(() => Network.PartySubmitRollAsync(code, roll, initBonus));
 
@@ -665,14 +758,83 @@ public sealed class Plugin : IDalamudPlugin
 
     // ── Helper ────────────────────────────────────────────────────────────────
 
-    public static RpItem DtoToItem(RpItemDto dto) => new()
+    /// <summary>Max nested bag depth / item counts accepted from the network.</summary>
+    private const int MaxItemDepth     = 4;
+    private const int MaxItemsPerLevel = 500;
+
+    public static RpItem DtoToItem(RpItemDto dto) => DtoToItem(dto, 0);
+
+    private static RpItem DtoToItem(RpItemDto dto, int depth) => new()
     {
         Id          = dto.Id,
-        Name        = dto.Name,
-        Description = dto.Description,
+        Name        = Truncate(dto.Name, 64),
+        Description = Truncate(dto.Description, 2048),
         IconId      = dto.IconId,
-        Amount      = dto.Amount,
+        Amount      = Math.Clamp(dto.Amount, 0, 9_999_999),
+        Type        = dto.Type,
+        Capacity    = Math.Clamp(dto.Capacity, 0, 1000),
+        // Depth/size-guarded: a malicious server payload cannot blow up the config
+        // with an unbounded or cyclic item tree.
+        Contents    = depth >= MaxItemDepth
+            ? new()
+            : dto.Contents?.Take(MaxItemsPerLevel).Select(c => DtoToItem(c, depth + 1)).ToList() ?? new(),
     };
+
+    private static string Truncate(string? s, int max)
+        => string.IsNullOrEmpty(s) ? string.Empty : (s.Length <= max ? s : s[..max]);
+
+    /// <summary>
+    /// Repairs a loaded configuration: drops structurally invalid entries (null slots,
+    /// empty codes/ids) so a corrupted or tampered file can't crash later code paths.
+    /// </summary>
+    private static void ValidateConfiguration(Configuration cfg)
+    {
+        cfg.Bags    ??= new();
+        cfg.Rooms   ??= new();
+        cfg.Parties ??= new();
+        cfg.SharedBags        ??= new();
+        cfg.Characters        ??= new();
+        cfg.PartyTemplates    ??= new();
+        cfg.PartyCharacters   ??= new();
+        cfg.FellowAdventurers ??= new();
+        cfg.ServerUrl         ??= string.Empty;
+
+        cfg.Bags.RemoveAll(b => b == null || b.Id == Guid.Empty);
+        foreach (var bag in cfg.Bags)
+        {
+            bag.Items ??= new();
+            bag.Items.RemoveAll(i => i == null || i.Id == Guid.Empty);
+        }
+        cfg.Rooms.RemoveAll(r => r == null || string.IsNullOrWhiteSpace(r.Code));
+        cfg.Parties.RemoveAll(p => p == null || string.IsNullOrWhiteSpace(p.Code));
+        cfg.SharedBags.RemoveAll(r => r == null || r.BagId == Guid.Empty);
+
+        foreach (var ch in cfg.Characters.Values)
+        {
+            ch.StatValues  ??= new();
+            ch.CheckValues ??= new();
+            ch.Skills      ??= new();
+            ch.Skills.RemoveAll(s => s == null);
+        }
+        foreach (var ch in cfg.PartyCharacters.Values)
+        {
+            ch.StatValues  ??= new();
+            ch.CheckValues ??= new();
+            ch.Skills      ??= new();
+            ch.Skills.RemoveAll(s => s == null);
+        }
+    }
+
+    public static RpItemDto ItemToDto(RpItem item) => new(
+        item.Id,
+        item.Name,
+        item.Description,
+        item.IconId,
+        item.Amount,
+        item.Type,
+        item.Capacity,
+        item.Contents.Count > 0 ? item.Contents.ConvertAll(ItemToDto) : null
+    );
 
     public string? LocalPlayerId
     {
@@ -709,6 +871,10 @@ public sealed class Plugin : IDalamudPlugin
 
     private void MigrateCharacters()
     {
+        // Idempotent: each character carries a SheetMigrated flag, and the config-level
+        // MigrationVersion short-circuits the whole scan once every character is done.
+        if (Configuration.MigrationVersion >= 1) return;
+
         bool dirty = false;
         foreach (var (_, ch) in Configuration.Characters)
         {
@@ -744,9 +910,16 @@ public sealed class Plugin : IDalamudPlugin
             ch.SheetMigrated = true;
             dirty = true;
         }
-        if (dirty) Configuration.Save();
+        Configuration.MigrationVersion = 1;
+        Configuration.Save();
+        if (dirty) Log.Info("Migrated legacy character stats to the modular sheet format.");
     }
 
+    /// <summary>
+    /// NOT a one-time migration: this seeds a per-party character copy for any party
+    /// that doesn't have one yet (including parties joined later), so it must keep
+    /// running on every load/login. It is idempotent via the ContainsKey check.
+    /// </summary>
     private void MigrateToPartyCharacters()
     {
         if (Configuration.Parties.Count == 0) return;
@@ -771,17 +944,38 @@ public sealed class Plugin : IDalamudPlugin
 
     private void OnSheetTemplateReceived(string partyCode, SheetTemplate template)
     {
+        // Validate the template before persisting — every window iterates Groups/Fields,
+        // so a malformed broadcast must not be able to poison the saved config.
+        if (string.IsNullOrWhiteSpace(partyCode) || template?.Groups == null
+            || template.Groups.Count > 100)
+        {
+            Log.Warning("[Net] Discarded malformed sheet template for party {0}.", partyCode ?? "?");
+            return;
+        }
+        template.Groups.RemoveAll(g => g == null || g.Fields == null);
+        foreach (var group in template.Groups)
+        {
+            if (group.Fields.Count > 200) group.Fields.RemoveRange(200, group.Fields.Count - 200);
+            group.Fields.RemoveAll(f => f == null || string.IsNullOrEmpty(f.Id));
+            foreach (var f in group.Fields)
+            {
+                f.Name    ??= string.Empty;
+                f.Tooltip ??= string.Empty;
+            }
+        }
+
         Configuration.PartyTemplates[partyCode] = template;
         Configuration.Save();
     }
 
     private void OnDiceRollReceived(DiceRollBroadcastDto dto)
     {
+        if (dto == null || string.IsNullOrWhiteSpace(dto.Message)) return;
         ChatGui.Print(new Dalamud.Game.Text.XivChatEntry
         {
             Message = new Dalamud.Game.Text.SeStringHandling.SeStringBuilder()
                 .AddUiForeground("[RPDice] ", 32)
-                .AddText($"{dto.DisplayName}: {dto.Message}")
+                .AddText($"{Truncate(dto.DisplayName, 64)}: {Truncate(dto.Message, 256)}")
                 .Build(),
             Type = Dalamud.Game.Text.XivChatType.Echo,
         });
@@ -894,6 +1088,16 @@ public sealed class Plugin : IDalamudPlugin
 
     private void OnProfileReceived(CharacterProfileDto profile)
     {
+        // Defensive: never let a malformed payload from the server corrupt local state
+        if (profile == null || string.IsNullOrWhiteSpace(profile.PlayerId)
+            || profile.StatValues == null || profile.CheckValues == null || profile.Skills == null
+            || profile.StatValues.Count > 1000 || profile.CheckValues.Count > 1000
+            || profile.Skills.Count > 200)
+        {
+            Log.Warning("[Net] Discarded malformed profile payload from server.");
+            return;
+        }
+
         string pid = profile.PlayerId;
         KnownOnlinePlayers.Add(pid);   // mark as online / profile cached
         bool openSheet  = _pendingSheetFetches.Remove(pid);

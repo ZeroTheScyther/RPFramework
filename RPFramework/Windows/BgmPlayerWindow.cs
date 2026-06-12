@@ -652,7 +652,11 @@ public class BgmPlayerWindow : Window, IDisposable
         bool enter = ImGui.InputText("##bgmsongurl", ref addSongUrl, 512,
             ImGuiInputTextFlags.EnterReturnsTrue);
 
-        bool canAdd = !string.IsNullOrWhiteSpace(addSongUrl) && !addSongLoading;
+        bool validUrl = BgmService.IsAllowedYoutubeUrl(addSongUrl.Trim());
+        if (!string.IsNullOrWhiteSpace(addSongUrl) && !validUrl)
+            ImGui.TextColored(new Vector4(1f, 0.4f, 0.4f, 1f), "Only youtube.com / youtu.be links are supported.");
+
+        bool canAdd = validUrl && !addSongLoading;
 
         if (!canAdd) ImGui.BeginDisabled();
         if ((ImGui.Button(addSongLoading ? "Adding...##bgmaddok" : "Add##bgmaddok",

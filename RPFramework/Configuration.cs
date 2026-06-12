@@ -9,6 +9,13 @@ namespace RPFramework;
 public class Configuration : IPluginConfiguration
 {
     public int         Version   { get; set; } = 0;
+
+    /// <summary>
+    /// One-time data migration level. 1 = legacy hardcoded stats copied into
+    /// StatValues/CheckValues (Plugin.MigrateCharacters). Lets startup skip the
+    /// per-character scan entirely on already-migrated saves.
+    /// </summary>
+    public int MigrationVersion { get; set; } = 0;
     public List<RpBag> Bags      { get; set; } = new();
     public List<RpRoom> Rooms    { get; set; } = new();
     public int         Gil       { get; set; } = 0;

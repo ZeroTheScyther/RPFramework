@@ -5,8 +5,18 @@ using RPFramework.Models;
 namespace RPFramework.Models.Net;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Wire DTOs — mirrors RPFrameworkServer/Models/Dto.cs
-// Keep these in sync if you change the server protocol.
+// Wire DTOs — MANUAL MIRROR of RPFrameworkServer/Models/Dto.cs
+//
+// ⚠ Any change to a record here MUST be applied to the server file too (and vice
+//   versa) or SignalR will silently fail to bind arguments at runtime.
+//   Known intentional differences (do not "fix"):
+//     • LoopMode is named NetLoopMode here (a local Models.LoopMode already exists)
+//     • SheetTemplateDto.Template is a typed SheetTemplate here but an opaque
+//       JsonElement on the server (the server passes templates through untouched)
+//     • RpSkillDto carries SkillCondition/SkillEffect model types here; the server
+//       declares structurally identical SkillConditionDto/SkillEffectDto records
+//   When adding fields, prefer trailing parameters with default values — they stay
+//   wire-compatible with older peers.
 // ─────────────────────────────────────────────────────────────────────────────
 
 public enum RoomRole { Member, Admin, Owner }
@@ -43,11 +53,14 @@ public record PlaybackCommandDto(
 // ── Inventory ─────────────────────────────────────────────────────────────────
 
 public record RpItemDto(
-    Guid   Id,
-    string Name,
-    string Description,
-    uint   IconId,
-    int    Amount
+    Guid             Id,
+    string           Name,
+    string           Description,
+    uint             IconId,
+    int              Amount,
+    RpItemType       Type     = RpItemType.Normal,
+    int              Capacity = 10,
+    List<RpItemDto>? Contents = null
 );
 
 public record TradeOfferDto(
