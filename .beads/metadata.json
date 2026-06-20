@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "RPFramework",
+  "project_id": "a9def31b-af0b-44e8-936e-e0da482b4fa0"
+}
