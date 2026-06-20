@@ -5,30 +5,29 @@ using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
 using Dalamud.Interface.Windowing;
-using RPFramework.Models;
-using RPFramework.Models.Net;
+using RPFramework.Contracts;
 
 namespace RPFramework.Windows;
 
 /// <summary>
-/// Read-only character sheet for a remote player, populated from the relay server.
+/// Read-only character sheet for a remote player. Reads straight from the store — the
+/// server hydrates every campaign member's character, so no fetch is needed.
 /// </summary>
 public class PlayerSheetWindow : Window, IDisposable
 {
     private readonly Plugin _plugin;
-    private CharacterProfileDto _profile;
-    private readonly string? _partyCode;
+    private readonly string _playerId;
+    private readonly string? _code;
     private readonly Action<string> _onClosed;
 
-    public PlayerSheetWindow(Plugin plugin, CharacterProfileDto profile, string? partyCode,
-                             Action<string> onClosed)
-        : base($"{profile.DisplayName} Character Sheet##rpcs_{profile.PlayerId}",
+    public PlayerSheetWindow(Plugin plugin, string playerId, Action<string> onClosed)
+        : base($"Character Sheet##rpcs_{playerId}",
                ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse)
     {
-        _plugin    = plugin;
-        _profile   = profile;
-        _partyCode = partyCode;
-        _onClosed  = onClosed;
+        _plugin   = plugin;
+        _playerId = playerId;
+        _code     = plugin.ActiveCampaign;
+        _onClosed = onClosed;
         SizeConstraints = new WindowSizeConstraints
         {
             MinimumSize = new Vector2(340, 480),
@@ -38,29 +37,36 @@ public class PlayerSheetWindow : Window, IDisposable
         SizeCondition = ImGuiCond.FirstUseEver;
     }
 
-    public void UpdateProfile(CharacterProfileDto profile) => _profile = profile;
-    public override void OnClose() => _onClosed(_profile.PlayerId);
+    public override void OnClose() => _onClosed(_playerId);
     public void Dispose() { }
 
     public override void Draw()
     {
-        var   p        = _profile;
-        var   template = _partyCode != null
-            ? _plugin.GetPartyTemplate(_partyCode)
-            : _plugin.Configuration.ActiveTemplate;
+        var ch = _code != null ? _plugin.Store.Character(_code, _playerId) : null;
+        if (ch == null)
+        {
+            ImGui.TextDisabled("This player is not in your active campaign.");
+            return;
+        }
+
+        var   st       = ch.State;
+        var   template = _plugin.Store.TemplateOrDefault(_code);
         float scale    = ImGuiHelpers.GlobalScale;
+
+        ImGui.TextUnformatted(ch.DisplayName);
+        ImGui.Separator();
 
         using var scroll = ImRaii.Child("##psheetscroll", new Vector2(-1, -1), false, ImGuiWindowFlags.HorizontalScrollbar);
         if (!scroll) return;
 
         foreach (var group in template.Groups)
         {
-            DrawGroup(group, p, template, scale);
+            DrawGroup(group, st, template, scale);
             ImGuiHelpers.ScaledDummy(4f);
         }
     }
 
-    private void DrawGroup(SheetGroup group, CharacterProfileDto p, SheetTemplate template, float scale)
+    private void DrawGroup(SheetGroup group, CharacterState p, SheetTemplate template, float scale)
     {
         ImGui.TextUnformatted(group.Name);
         ImGui.Separator();
@@ -70,6 +76,7 @@ public class PlayerSheetWindow : Window, IDisposable
         var dots    = group.Fields.Where(f => f.Type == FieldType.Dot).ToList();
         var numbers = group.Fields.Where(f => f.Type == FieldType.Number).ToList();
         var checks  = group.Fields.Where(f => f.Type == FieldType.Checkbox).ToList();
+        var texts   = group.Fields.Where(f => f.Type == FieldType.Text).ToList();
 
         foreach (var f in bars)
         {
@@ -77,21 +84,12 @@ public class PlayerSheetWindow : Window, IDisposable
             ImGui.Spacing();
         }
 
-        if (bars.Any(bf => bf.IsApBar))
+        var apField = bars.FirstOrDefault(bf => bf.IsApBar);
+        if (apField != null)
         {
-            var apField = bars.FirstOrDefault(bf => bf.IsApBar);
-            if (apField != null)
-            {
-                p.StatValues.TryGetValue(apField.Id + ":cur", out int apCur);
-                p.StatValues.TryGetValue(apField.Id + ":max", out int apMax);
-                if (apMax > 0)
-                {
-                    float pct = (float)apCur / apMax;
-                    int pen = pct switch { <= 0.10f => -5, <= 0.20f => -4, <= 0.30f => -2, <= 0.40f => -1, _ => 0 };
-                    if (pen < 0)
-                        ImGui.TextColored(new Vector4(1f, 0.4f, 0.2f, 1f), $"Exhausted: {pen} to all stat rolls");
-                }
-            }
+            int pen = StatMath.ApPenalty(p, template);
+            if (pen < 0)
+                ImGui.TextColored(new Vector4(1f, 0.4f, 0.2f, 1f), $"Exhausted: {pen} to all stat rolls");
         }
 
         foreach (var f in dots)
@@ -133,9 +131,23 @@ public class PlayerSheetWindow : Window, IDisposable
                 MaybeTooltip(f);
             }
         }
+
+        if (texts.Count > 0)
+        {
+            if (bars.Count > 0 || dots.Count > 0 || numbers.Count > 0 || checks.Count > 0) ImGui.Spacing();
+            foreach (var f in texts)
+            {
+                p.TextValues.TryGetValue(f.Id, out string? val);
+                ImGui.TextUnformatted(f.Name); MaybeTooltip(f);
+                if (string.IsNullOrWhiteSpace(val)) { ImGui.TextDisabled("(empty)"); continue; }
+                ImGui.PushTextWrapPos(ImGui.GetContentRegionAvail().X);
+                ImGui.TextUnformatted(val);
+                ImGui.PopTextWrapPos();
+            }
+        }
     }
 
-    private static void DrawDotField(SheetField f, CharacterProfileDto p, float scale)
+    private static void DrawDotField(SheetField f, CharacterState p, float scale)
     {
         p.StatValues.TryGetValue(f.Id + ":cur", out int cur);
         int dotMax = Math.Max(1, f.Max);
@@ -148,7 +160,6 @@ public class PlayerSheetWindow : Window, IDisposable
         float r       = 6f * scale;
         float gap     = 3f * scale;
 
-        // Vertically center the dots with the text line
         float dotH    = 2f * r;
         float baseY   = ImGui.GetCursorPosY();
         float yOffset = MathF.Max(0f, (ImGui.GetTextLineHeight() - dotH) * 0.5f);
@@ -183,7 +194,7 @@ public class PlayerSheetWindow : Window, IDisposable
         ImGui.EndTooltip();
     }
 
-    private static void DrawBarField(SheetField f, CharacterProfileDto p, SheetTemplate template, float scale)
+    private static void DrawBarField(SheetField f, CharacterState p, SheetTemplate template, float scale)
     {
         p.StatValues.TryGetValue(f.Id + ":cur", out int cur);
         p.StatValues.TryGetValue(f.Id + ":max", out int max);
@@ -195,7 +206,7 @@ public class PlayerSheetWindow : Window, IDisposable
             var bonusField = template.FindField(f.BonusSourceFieldId);
             if (bonusField != null && p.StatValues.TryGetValue(f.BonusSourceFieldId, out int bonusSrc))
             {
-                bonus      = SkillHelpers.StatMod(bonusSrc);
+                bonus      = StatMath.StatMod(bonusSrc);
                 bonusLabel = bonusField.Name;
             }
         }
@@ -220,7 +231,7 @@ public class PlayerSheetWindow : Window, IDisposable
         }
     }
 
-    private static void DrawNumberRow(SheetField f1, SheetField? f2, CharacterProfileDto p, float scale)
+    private static void DrawNumberRow(SheetField f1, SheetField? f2, CharacterState p, float scale)
     {
         ImGui.TableNextRow();
 
@@ -229,7 +240,7 @@ public class PlayerSheetWindow : Window, IDisposable
         ImGui.TableSetColumnIndex(1); ImGui.TextUnformatted($"{v1}");
         if (f1.ShowModifier)
         {
-            int m = SkillHelpers.StatMod(v1);
+            int m = StatMath.StatMod(v1);
             ImGui.TableSetColumnIndex(2);
             ImGui.TextDisabled(m >= 0 ? $"+{m}" : $"{m}");
         }
@@ -241,7 +252,7 @@ public class PlayerSheetWindow : Window, IDisposable
         ImGui.TableSetColumnIndex(4); ImGui.TextUnformatted($"{v2}");
         if (f2.ShowModifier)
         {
-            int m = SkillHelpers.StatMod(v2);
+            int m = StatMath.StatMod(v2);
             ImGui.TableSetColumnIndex(5);
             ImGui.TextDisabled(m >= 0 ? $"+{m}" : $"{m}");
         }

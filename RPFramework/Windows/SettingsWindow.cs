@@ -74,11 +74,7 @@ public class SettingsWindow : Window, IDisposable
                 plugin.Configuration.ServerUrl = serverUrlBuf.Trim();
                 plugin.Configuration.Save();
                 urlDirty = false;
-                string url  = plugin.Configuration.ServerUrl;
-                string? id  = plugin.LocalPlayerId;
-                string name = plugin.LocalDisplayName;
-                if (id != null)
-                    Task.Run(() => plugin.Network.ConnectAsync(url, id, name));
+                plugin.Connect();
             }
         }
         else if (connected)
@@ -89,13 +85,7 @@ public class SettingsWindow : Window, IDisposable
         else
         {
             if (ImGui.Button("Connect##connect", new Vector2(btnW, 0)))
-            {
-                string url  = plugin.Configuration.ServerUrl;
-                string? id  = plugin.LocalPlayerId;
-                string name = plugin.LocalDisplayName;
-                if (id != null)
-                    Task.Run(() => plugin.Network.ConnectAsync(url, id, name));
-            }
+                plugin.Connect();
         }
 
         ImGui.Spacing();

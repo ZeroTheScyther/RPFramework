@@ -1,33 +1,33 @@
 using System;
+using System.Collections.Generic;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
 using Dalamud.Interface.Windowing;
-using RPFramework.Models;
-using RPFramework.Models.Net;
+using RPFramework.Contracts;
 
 namespace RPFramework.Windows;
 
-/// <summary>
-/// Read-only skills list for a remote player, populated from the relay server.
-/// </summary>
+/// <summary>Read-only skills list for a remote player, read straight from the store.</summary>
 public class PlayerSkillsWindow : Window, IDisposable
 {
     private readonly Plugin _plugin;
-    private CharacterProfileDto _profile;
-    private int _selectedIdx = -1;
+    private readonly string _playerId;
+    private readonly string? _code;
     private readonly Action<string> _onClosed;
+    private int _selectedIdx = -1;
 
     private static readonly string[] CondOpNames   = { "<", "≤", "=", "≥", ">" };
-    private static readonly string[] EffectOpNames = { "+", "−", "=" };
+    private static readonly string[] EffectOpNames = { "+", "−", "=", "×", "÷" };
 
-    public PlayerSkillsWindow(Plugin plugin, CharacterProfileDto profile, Action<string> onClosed)
-        : base($"{profile.DisplayName} Skills##rpsk_{profile.PlayerId}",
+    public PlayerSkillsWindow(Plugin plugin, string playerId, Action<string> onClosed)
+        : base($"Skills##rpsk_{playerId}",
                ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse)
     {
         _plugin   = plugin;
-        _profile  = profile;
+        _playerId = playerId;
+        _code     = plugin.ActiveCampaign;
         _onClosed = onClosed;
         SizeConstraints = new WindowSizeConstraints
         {
@@ -38,41 +38,42 @@ public class PlayerSkillsWindow : Window, IDisposable
         SizeCondition = ImGuiCond.FirstUseEver;
     }
 
-    public void UpdateProfile(CharacterProfileDto profile)
-    {
-        _profile = profile;
-        if (_selectedIdx >= _profile.Skills.Count) _selectedIdx = -1;
-    }
-
-    public override void OnClose() => _onClosed(_profile.PlayerId);
+    public override void OnClose() => _onClosed(_playerId);
     public void Dispose() { }
+
+    private List<RpSkill> Skills
+    {
+        get
+        {
+            var ch = _code != null ? _plugin.Store.Character(_code, _playerId) : null;
+            return ch?.State.Skills ?? new List<RpSkill>();
+        }
+    }
 
     public override void Draw()
     {
         float scale = ImGuiHelpers.GlobalScale;
         float leftW = 170 * scale;
+        var skills = Skills;
 
         using (var left = ImRaii.Child("##rpviewsklist", new Vector2(leftW, -1), false))
         {
             if (left)
             {
-                if (_selectedIdx >= _profile.Skills.Count)
-                    _selectedIdx = _profile.Skills.Count - 1;
+                if (_selectedIdx >= skills.Count) _selectedIdx = skills.Count - 1;
 
-                for (int i = 0; i < _profile.Skills.Count; i++)
+                for (int i = 0; i < skills.Count; i++)
                 {
-                    var    sk    = _profile.Skills[i];
+                    var    sk    = skills[i];
                     string badge = sk.Type == SkillType.Active ? "[A]" : "[P]";
-                    string label = $"{badge} {sk.Name}##rpviewsk_{i}";
                     bool   sel   = _selectedIdx == i;
 
                     if (sel) ImGui.PushStyleColor(ImGuiCol.Header, new Vector4(0.26f, 0.59f, 0.98f, 0.4f));
-                    if (ImGui.Selectable(label, sel)) _selectedIdx = i;
+                    if (ImGui.Selectable($"{badge} {sk.Name}##rpviewsk_{i}", sel)) _selectedIdx = i;
                     if (sel) ImGui.PopStyleColor();
                 }
 
-                if (_profile.Skills.Count == 0)
-                    ImGui.TextDisabled("No skills.");
+                if (skills.Count == 0) ImGui.TextDisabled("No skills.");
             }
         }
 
@@ -81,22 +82,21 @@ public class PlayerSkillsWindow : Window, IDisposable
         using var right = ImRaii.Child("##rpviewskeditor", new Vector2(-1, -1), false);
         if (!right) return;
 
-        if (_selectedIdx < 0 || _selectedIdx >= _profile.Skills.Count)
+        if (_selectedIdx < 0 || _selectedIdx >= skills.Count)
         {
             ImGui.TextDisabled("Select a skill to view.");
             return;
         }
 
-        DrawSkillView(_profile.Skills[_selectedIdx]);
+        DrawSkillView(skills[_selectedIdx]);
     }
 
-    private void DrawSkillView(RpSkillDto skill)
+    private void DrawSkillView(RpSkill skill)
     {
-        var template = _plugin.Configuration.ActiveTemplate;
+        var template = _plugin.Store.TemplateOrDefault(_code);
         string GetFieldName(string fid) => template.FindField(fid)?.Name ?? fid;
 
-        string typeBadge = skill.Type == SkillType.Active ? "[Active]" : "[Passive]";
-        ImGui.TextDisabled(typeBadge);
+        ImGui.TextDisabled(skill.Type == SkillType.Active ? "[Active]" : "[Passive]");
         ImGui.SameLine();
         ImGui.TextUnformatted(skill.Name);
 
@@ -118,9 +118,8 @@ public class PlayerSkillsWindow : Window, IDisposable
             ImGui.TextUnformatted("Conditions");
             foreach (var c in skill.Conditions)
             {
-                string fid = SkillHelpers.EffectiveFieldId(c);
                 string pct = c.IsPercentage ? "%" : "";
-                ImGui.TextDisabled($"  {GetFieldName(fid)} {CondOpNames[(int)c.Op]} {c.Value:0}{pct}");
+                ImGui.TextDisabled($"  {GetFieldName(c.FieldId)} {CondOpNames[(int)c.Op]} {c.Value:0}{pct}");
             }
             ImGui.Spacing();
             ImGui.Separator();
@@ -131,9 +130,8 @@ public class PlayerSkillsWindow : Window, IDisposable
             ImGui.TextUnformatted("Effects");
             foreach (var fx in skill.Effects)
             {
-                string fid = SkillHelpers.EffectiveFieldId(fx);
                 string pct = fx.IsPercentage ? "%" : "";
-                ImGui.TextDisabled($"  {GetFieldName(fid)} {EffectOpNames[(int)fx.Op]} {fx.Value:0.#}{pct}");
+                ImGui.TextDisabled($"  {GetFieldName(fx.FieldId)} {EffectOpNames[(int)fx.Op]} {fx.Value:0.#}{pct}");
             }
         }
     }

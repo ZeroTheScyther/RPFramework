@@ -1,32 +1,27 @@
 using System;
-using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
-using System.Threading.Tasks;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
 using Dalamud.Interface.Windowing;
-using RPFramework.Models;
-using RPFramework.Models.Net;
 using RPFramework.Services;
 
 namespace RPFramework.Windows;
 
+/// <summary>
+/// BGM room browser. Campaign rooms appear automatically for every campaign member; solo rooms are
+/// discovered by code. Rooms have a name and optional password; create/join are intents.
+/// </summary>
 public class BgmWindow : Window, IDisposable
 {
     private readonly Plugin          plugin;
     private readonly BgmService      bgmService;
     private readonly BgmPlayerWindow playerWindow;
 
-    private int    selectedRoom = -1;
-    private string newRoomName  = string.Empty;
-    private bool   pendingCreate;
-    private bool   createOpen   = true;
-    private string joinCode     = string.Empty;
-    private string joinName     = string.Empty;
-    private bool   pendingJoin;
-    private bool   joinOpen     = true;
+    private bool   _pendingCreate, _createOpen;
+    private string _createName = "", _createPw = "";
+    private string _joinCode = "", _joinPw = "";
 
     public BgmWindow(Plugin plugin, BgmService bgmService, BgmPlayerWindow playerWindow)
         : base("RP BGM##RPFramework.BGM")
@@ -34,285 +29,113 @@ public class BgmWindow : Window, IDisposable
         this.plugin       = plugin;
         this.bgmService   = bgmService;
         this.playerWindow = playerWindow;
-
-        SizeConstraints = new WindowSizeConstraints
-        {
-            MinimumSize = new Vector2(260, 280),
-            MaximumSize = new Vector2(600, 800),
-        };
-        Size          = new Vector2(300, 360);
+        SizeConstraints = new WindowSizeConstraints { MinimumSize = new Vector2(280, 300), MaximumSize = new Vector2(600, 800) };
+        Size          = new Vector2(320, 380);
         SizeCondition = ImGuiCond.FirstUseEver;
     }
 
     public void Dispose() { }
 
+    /// <summary>The campaign a newly-created room is scoped to: the active campaign unless it's the solo scope.</summary>
+    private string? ScopeCampaign()
+    {
+        var code = plugin.ActiveCampaign;
+        return code != null && plugin.Store.Party(code)?.IsPersonal == false ? code : null;
+    }
+
+    private void OpenRoom(string code, string? pw)
+    {
+        _ = plugin.Network.RoomJoin(code, pw);   // idempotent if already a member; campaign members bypass the password
+        playerWindow.OpenRoom(code);             // sets active + remembers for reconnect
+    }
+
     public override void Draw()
     {
         if (!plugin.Network.IsConnected)
         {
-            DrawNotConnected();
+            ImGui.TextDisabled("Not connected to server.");
+            if (ImGui.Button("Connect##bgmconn")) plugin.Connect();
             return;
         }
 
-        if (pendingCreate) { createOpen = true; ImGui.OpenPopup("##bgm_create"); pendingCreate = false; }
-        if (pendingJoin)   { joinOpen   = true; ImGui.OpenPopup("##bgm_join");   pendingJoin   = false; }
+        if (_pendingCreate) { _createOpen = true; ImGui.OpenPopup("##bgm_create"); _pendingCreate = false; }
 
-        var rooms = plugin.Configuration.Rooms;
-        if (selectedRoom >= rooms.Count) selectedRoom = rooms.Count - 1;
+        float scale = ImGuiHelpers.GlobalScale;
+        var rooms = plugin.Store.Rooms.OrderBy(r => r.Name).ToList();
 
-        // Room code display
-        if (selectedRoom >= 0 && selectedRoom < rooms.Count)
-        {
-            var room = rooms[selectedRoom];
-            ImGui.TextDisabled("Room Code:");
-            ImGui.SameLine();
-            ImGui.TextUnformatted(room.Code);
-            ImGui.SameLine();
-            if (ImGui.SmallButton("Copy##bgmcode"))
-                ImGui.SetClipboardText(room.Code);
-        }
-        else
-        {
-            ImGui.TextDisabled("Select or create a room");
-        }
-
+        ImGui.TextDisabled("Rooms");
         ImGui.Separator();
 
-        // Room list
-        float listH = ImGui.GetContentRegionAvail().Y
-                      - ImGui.GetFrameHeightWithSpacing()
-                      - ImGui.GetStyle().ItemSpacing.Y;
-
-        using (var child = ImRaii.Child("##bgmroomlist", new Vector2(-1, listH), true))
+        using (var child = ImRaii.Child("##bgmroomlist", new Vector2(-1, -ImGui.GetFrameHeightWithSpacing() * 2 - 8), true))
         {
             if (child)
             {
-                for (int i = 0; i < rooms.Count; i++)
+                foreach (var room in rooms)
                 {
-                    var room = rooms[i];
-                    ImGui.PushID($"##bgmr{room.Id}");
-
-                    bool selected = selectedRoom == i;
-                    if (ImGui.Selectable(room.Name, selected,
-                        ImGuiSelectableFlags.AllowDoubleClick))
-                    {
-                        selectedRoom = i;
-                        if (ImGui.IsMouseDoubleClicked(ImGuiMouseButton.Left))
-                        {
-                            playerWindow.OpenRoom(room, bgmService);
-                            playerWindow.IsOpen = true;
-                        }
-                    }
-
-                    // Right-click → delete room
+                    ImGui.PushID($"##bgmr_{room.Code}");
+                    bool playing = bgmService.CurrentRoomCode == room.Code && bgmService.IsPlaying;
+                    bool campaign = !string.IsNullOrEmpty(room.CampaignCode);
+                    string label = $"{(playing ? "♪ " : "")}{room.Name}";
+                    if (ImGui.Selectable(label)) OpenRoom(room.Code, null);
+                    if (campaign) { ImGui.SameLine(); ImGui.TextDisabled("[campaign]"); }
+                    if (ImGui.IsItemHovered()) ImGui.SetTooltip($"Code: {room.Code}  ·  {room.Members.Count} listening");
                     if (ImGui.BeginPopupContextItem("##bgmrctx"))
                     {
-                        if (ImGui.MenuItem("Delete room"))
-                        {
-                            if (bgmService.CurrentRoom == room) bgmService.Stop();
-                            string roomCode = room.Code;
-                            rooms.RemoveAt(i);
-                            if (selectedRoom >= rooms.Count) selectedRoom = rooms.Count - 1;
-                            plugin.Configuration.Save();
-                            // If connected, broadcast deletion to all room members (server enforces owner-only)
-                            if (plugin.Network.IsConnected)
-                                Task.Run(() => plugin.Network.BgmDeleteAsync(roomCode));
-                            ImGui.CloseCurrentPopup();
-                        }
+                        if (ImGui.MenuItem("Open player")) OpenRoom(room.Code, null);
+                        if (ImGui.MenuItem("Copy code")) ImGui.SetClipboardText(room.Code);
+                        if (ImGui.MenuItem("Leave room")) plugin.Bgm.LeaveRoom(room.Code);
                         ImGui.EndPopup();
                     }
-
                     ImGui.PopID();
                 }
-
-                if (rooms.Count == 0)
-                    ImGui.TextDisabled("No rooms. Click '+ Create Room' to start.");
-
-                DrawPartyRooms();
+                if (rooms.Count == 0) ImGui.TextDisabled("No rooms. Create one or join by code.");
             }
         }
 
-        // Create / Join buttons
-        float btnW = (ImGui.GetContentRegionAvail().X - ImGui.GetStyle().ItemSpacing.X) / 2;
-        if (ImGui.Button("+ Create##bgmcreate", new Vector2(btnW, 0)))
-        {
-            newRoomName = string.Empty;
-            pendingCreate = true;
-        }
-        ImGui.SameLine();
-        if (ImGui.Button("+ Join##bgmjoin", new Vector2(btnW, 0)))
-        {
-            joinCode = string.Empty;
-            joinName = string.Empty;
-            pendingJoin = true;
-        }
+        if (ImGui.Button("+ Create Room##bgmcreate", new Vector2(-1, 0)))
+        { _createName = ""; _createPw = ""; _pendingCreate = true; }
 
-        DrawCreateModal(rooms);
-        DrawJoinModal(rooms);
+        ImGui.SetNextItemWidth(90 * scale);
+        ImGui.InputTextWithHint("##bgmjoincode", "Code", ref _joinCode, 16);
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(-60 * scale);
+        ImGui.InputTextWithHint("##bgmjoinpw", "Password (if any)", ref _joinPw, 64, ImGuiInputTextFlags.Password);
+        ImGui.SameLine();
+        using (ImRaii.Disabled(string.IsNullOrWhiteSpace(_joinCode)))
+            if (ImGui.Button("Join##bgmjoin", new Vector2(50 * scale, 0)))
+            {
+                OpenRoom(_joinCode.Trim(), string.IsNullOrEmpty(_joinPw) ? null : _joinPw);
+                _joinCode = ""; _joinPw = "";
+            }
+
+        DrawCreateModal();
     }
 
-    private void DrawPartyRooms()
+    private void DrawCreateModal()
     {
-        // Collect all room codes currently occupied by party members (not self)
-        string? localId = plugin.LocalPlayerId;
-        var partyRooms = new List<(string RoomCode, string MemberName, string PartyName)>();
+        if (!_createOpen) return;
+        ImGui.SetNextWindowSize(new Vector2(320 * ImGuiHelpers.GlobalScale, 0), ImGuiCond.Always);
+        if (!ImGui.BeginPopupModal("##bgm_create", ref _createOpen, ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoResize)) return;
 
-        foreach (var party in plugin.Configuration.Parties)
-        {
-            if (!plugin.PartyMembers.TryGetValue(party.Code, out var members)) continue;
-            foreach (var member in members)
-            {
-                if (member.PlayerId == localId) continue;
-                foreach (var roomCode in member.BgmRoomCodes)
-                {
-                    // Skip rooms the local player is already in
-                    if (plugin.Configuration.Rooms.Any(r => r.Code == roomCode)) continue;
-                    partyRooms.Add((roomCode, member.DisplayName, party.Name));
-                }
-            }
-        }
+        bool scoped = ScopeCampaign() != null;
+        ImGui.TextUnformatted("Create BGM Room");
+        ImGui.Separator(); ImGui.Spacing();
+        ImGui.TextDisabled(scoped ? "Visible to everyone in your active campaign." : "Solo room — share the code to let others join.");
+        ImGui.Spacing();
 
-        if (partyRooms.Count == 0) return;
+        ImGui.TextUnformatted("Name:");     ImGui.SetNextItemWidth(-1); ImGui.InputText("##bgmcname", ref _createName, 64);
+        ImGui.TextUnformatted("Password (optional):"); ImGui.SetNextItemWidth(-1); ImGui.InputText("##bgmcpw", ref _createPw, 64, ImGuiInputTextFlags.Password);
 
         ImGui.Spacing();
-        ImGui.Separator();
-
-        bool expanded = ImGui.TreeNodeEx("##partyroomsnode",
-            ImGuiTreeNodeFlags.SpanAvailWidth | ImGuiTreeNodeFlags.DefaultOpen,
-            $"Party Rooms ({partyRooms.Count})");
-        if (!expanded) return;
-
-        foreach (var (roomCode, memberName, partyName) in partyRooms)
-        {
-            ImGui.TextDisabled($"  {memberName}");
-            ImGui.SameLine();
-            ImGui.TextUnformatted(roomCode);
-            ImGui.SameLine();
-            ImGui.TextDisabled($"({partyName})");
-            ImGui.SameLine();
-            if (ImGui.SmallButton($"Join##{roomCode}_{memberName}"))
+        float bw = 100 * ImGuiHelpers.GlobalScale;
+        using (ImRaii.Disabled(string.IsNullOrWhiteSpace(_createName)))
+            if (ImGui.Button("Create##bgmdocreate", new Vector2(bw, 0)))
             {
-                var code = roomCode;
-                var name = $"Room {roomCode}";
-                var room = new RpRoom { Name = name, Code = code };
-                plugin.Configuration.Rooms.Add(room);
-                selectedRoom = plugin.Configuration.Rooms.Count - 1;
-                plugin.Configuration.Save();
-                Task.Run(() => plugin.Network.BgmJoinAsync(code));
-                playerWindow.OpenRoom(room, bgmService);
-                playerWindow.IsOpen = true;
+                _ = plugin.Network.RoomCreate(_createName.Trim(), string.IsNullOrEmpty(_createPw) ? null : _createPw, ScopeCampaign());
+                _createOpen = false; ImGui.CloseCurrentPopup();
             }
-        }
-
-        ImGui.TreePop();
-    }
-
-    private void DrawNotConnected()
-    {
-        var avail  = ImGui.GetContentRegionAvail();
-        float lineH = ImGui.GetTextLineHeightWithSpacing();
-        ImGui.SetCursorPosY(ImGui.GetCursorPosY() + avail.Y / 2 - lineH);
-
-        const string msg = "Not connected to server";
-        ImGui.SetCursorPosX((avail.X - ImGui.CalcTextSize(msg).X) / 2);
-        ImGui.TextDisabled(msg);
-
-        float btnW = 120 * ImGuiHelpers.GlobalScale;
-        ImGui.SetCursorPosX((avail.X - btnW) / 2);
-        if (ImGui.Button("Reconnect##bgmreconnect", new Vector2(btnW, 0)))
-        {
-            string url  = plugin.Configuration.ServerUrl;
-            string? id  = plugin.LocalPlayerId;
-            string name = plugin.LocalDisplayName;
-            if (id != null)
-                Task.Run(() => plugin.Network.ConnectAsync(url, id, name));
-        }
-    }
-
-    private void DrawJoinModal(List<RpRoom> rooms)
-    {
-        var center = ImGui.GetMainViewport().GetCenter();
-        ImGui.SetNextWindowPos(center, ImGuiCond.Appearing, new Vector2(0.5f, 0.5f));
-        float w0 = 300 * ImGuiHelpers.GlobalScale;
-        ImGui.SetNextWindowSizeConstraints(new Vector2(w0, 0), new Vector2(w0, float.MaxValue));
-
-        if (!ImGui.BeginPopupModal("##bgm_join", ref joinOpen,
-            ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoTitleBar))
-            return;
-
-        ImGui.TextUnformatted("Join Room");
-        ImGui.Separator();
-
-        ImGui.TextDisabled("Room Code");
-        ImGui.SetNextItemWidth(220 * ImGuiHelpers.GlobalScale);
-        ImGui.InputText("##bgmjoincode", ref joinCode, 16);
-        joinCode = joinCode.Trim().ToUpperInvariant();
-
-        ImGui.TextDisabled("Local Name (optional)");
-        ImGui.SetNextItemWidth(220 * ImGuiHelpers.GlobalScale);
-        bool enter = ImGui.InputText("##bgmjoinname", ref joinName, 48,
-            ImGuiInputTextFlags.EnterReturnsTrue);
-
-        bool canJoin = joinCode.Length > 0;
-        if (!canJoin) ImGui.BeginDisabled();
-        if ((ImGui.Button("Join##bgmjoinok", new Vector2(96, 0)) || enter) && canJoin)
-        {
-            string name = string.IsNullOrWhiteSpace(joinName) ? $"Room {joinCode}" : joinName.Trim();
-            var room = new RpRoom { Name = name, Code = joinCode };
-            rooms.Add(room);
-            selectedRoom = rooms.Count - 1;
-            plugin.Configuration.Save();
-            playerWindow.OpenRoom(room, bgmService);
-            playerWindow.IsOpen = true;
-            ImGui.CloseCurrentPopup();
-        }
-        if (!canJoin) ImGui.EndDisabled();
-
         ImGui.SameLine();
-        if (ImGui.Button("Cancel##bgmjoincancel", new Vector2(96, 0)))
-            ImGui.CloseCurrentPopup();
-
-        ImGui.EndPopup();
-    }
-
-    private void DrawCreateModal(List<RpRoom> rooms)
-    {
-        var center = ImGui.GetMainViewport().GetCenter();
-        ImGui.SetNextWindowPos(center, ImGuiCond.Appearing, new Vector2(0.5f, 0.5f));
-        float w0 = 300 * ImGuiHelpers.GlobalScale;
-        ImGui.SetNextWindowSizeConstraints(new Vector2(w0, 0), new Vector2(w0, float.MaxValue));
-
-        if (!ImGui.BeginPopupModal("##bgm_create", ref createOpen,
-            ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoTitleBar))
-            return;
-
-        ImGui.TextUnformatted("Create Room");
-        ImGui.Separator();
-
-        ImGui.SetNextItemWidth(220 * ImGuiHelpers.GlobalScale);
-        bool enter = ImGui.InputText("##bgmroomname", ref newRoomName, 48,
-            ImGuiInputTextFlags.EnterReturnsTrue);
-
-        bool canCreate = !string.IsNullOrWhiteSpace(newRoomName);
-        if (!canCreate) ImGui.BeginDisabled();
-        if ((ImGui.Button("Create##bgmroomok", new Vector2(96, 0)) || enter) && canCreate)
-        {
-            var room = new RpRoom { Name = newRoomName.Trim() };
-            rooms.Add(room);
-            selectedRoom = rooms.Count - 1;
-            plugin.Configuration.Save();
-            string code = room.Code;
-            Task.Run(() => plugin.Network.BgmJoinAsync(code, isCreator: true));
-            playerWindow.OpenRoom(room, bgmService, autoJoin: false);
-            playerWindow.IsOpen = true;
-            ImGui.CloseCurrentPopup();
-        }
-        if (!canCreate) ImGui.EndDisabled();
-
-        ImGui.SameLine();
-        if (ImGui.Button("Cancel##bgmroomcancel", new Vector2(96, 0)))
-            ImGui.CloseCurrentPopup();
-
+        if (ImGui.Button("Cancel##bgmcancelcreate", new Vector2(bw, 0))) { _createOpen = false; ImGui.CloseCurrentPopup(); }
         ImGui.EndPopup();
     }
 }

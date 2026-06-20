@@ -1,7 +1,9 @@
-using System;
-using System.Collections.Generic;
+namespace RPFramework.Contracts;
 
-namespace RPFramework.Models;
+// ─────────────────────────────────────────────────────────────────────────────
+// The modular character-sheet template. Server-owned and authoritative; clients
+// render it. Plain serializable POCOs so SignalR transports them as typed objects.
+// ─────────────────────────────────────────────────────────────────────────────
 
 public static class WellKnownIds
 {
@@ -16,14 +18,16 @@ public static class WellKnownIds
     public const string Int = "builtin:int";
     public const string Cha = "builtin:cha";
 
+    // Profile header (player-invented flavor text — no icons)
+    public const string Name = "builtin:name";
+    public const string Race = "builtin:race";
+    public const string Job  = "builtin:job";
+
     public static string SpecId(string specName)
         => "builtin:spec:" + specName.ToLowerInvariant().Replace(' ', '_');
 }
 
-public enum FieldType { Number, Checkbox, Bar, Dot }
-
-[Serializable]
-public class SheetField
+public sealed class SheetField
 {
     public string    Id   { get; set; } = Guid.NewGuid().ToString();
     public string    Name { get; set; } = "Field";
@@ -37,6 +41,9 @@ public class SheetField
     // Bar: optional Number field whose StatMod() is added to this bar's effective max
     public string? BonusSourceFieldId { get; set; } = null;
 
+    // Text field: render as a multiline notes box (true) or a single-line input (false, e.g. Name/Race/Job)
+    public bool Multiline { get; set; } = true;
+
     // Role flags
     public bool IsHpBar          { get; set; } = false;
     public bool IsApBar          { get; set; } = false;
@@ -46,16 +53,14 @@ public class SheetField
     public string Tooltip { get; set; } = "";
 }
 
-[Serializable]
-public class SheetGroup
+public sealed class SheetGroup
 {
     public string           Id     { get; set; } = Guid.NewGuid().ToString();
     public string           Name   { get; set; } = "Group";
     public List<SheetField> Fields { get; set; } = new();
 }
 
-[Serializable]
-public class SheetTemplate
+public sealed class SheetTemplate
 {
     public string           Id     { get; set; } = Guid.NewGuid().ToString();
     public List<SheetGroup> Groups { get; set; } = new();
@@ -137,6 +142,19 @@ public class SheetTemplate
             [
                 new SheetGroup
                 {
+                    Id = "builtin:profile", Name = "Profile",
+                    Fields =
+                    [
+                        new SheetField { Id = WellKnownIds.Name, Name = "Name", Type = FieldType.Text, Multiline = false,
+                            Tooltip = "Your character's name." },
+                        new SheetField { Id = WellKnownIds.Race, Name = "Race", Type = FieldType.Text, Multiline = false,
+                            Tooltip = "Your character's race or clan." },
+                        new SheetField { Id = WellKnownIds.Job, Name = "Job", Type = FieldType.Text, Multiline = false,
+                            Tooltip = "Player-invented job/class flavor (e.g. Paladin, Elemental Slayer)." },
+                    ],
+                },
+                new SheetGroup
+                {
                     Id = "builtin:pools", Name = "Pools",
                     Fields =
                     [
@@ -182,6 +200,32 @@ public class SheetTemplate
                 {
                     Id = "builtin:specs", Name = "Specializations",
                     Fields = specFields,
+                },
+                new SheetGroup
+                {
+                    Id = "builtin:personality", Name = "Personality",
+                    Fields =
+                    [
+                        new SheetField { Id = "builtin:core_values", Name = "Core Values", Type = FieldType.Text,
+                            Tooltip = "What your character believes in and stands for." },
+                        new SheetField { Id = "builtin:flaws", Name = "Flaws", Type = FieldType.Text,
+                            Tooltip = "Weaknesses, vices, and shortcomings." },
+                    ],
+                },
+                new SheetGroup
+                {
+                    Id = "builtin:background", Name = "Background",
+                    Fields =
+                    [
+                        new SheetField { Id = "builtin:allies", Name = "Allies & Organizations", Type = FieldType.Text,
+                            Tooltip = "Friends, contacts, factions, and affiliations." },
+                        new SheetField { Id = "builtin:traits", Name = "Traits", Type = FieldType.Text,
+                            Tooltip = "Notable characteristics, quirks, and distinguishing features." },
+                        new SheetField { Id = "builtin:languages", Name = "Languages", Type = FieldType.Text,
+                            Tooltip = "Languages your character can speak or understand." },
+                        new SheetField { Id = "builtin:misc", Name = "Misc", Type = FieldType.Text,
+                            Tooltip = "Anything else worth noting." },
+                    ],
                 },
             ],
         };

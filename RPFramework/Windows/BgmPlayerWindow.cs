@@ -1,694 +1,121 @@
 using System;
-using System.Collections.Generic;
 using System.Numerics;
 using System.Threading.Tasks;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
 using Dalamud.Interface.Windowing;
-using RPFramework.Models;
-using RPFramework.Models.Net;
+using RPFramework.Contracts;
 using RPFramework.Services;
 
 namespace RPFramework.Windows;
 
+/// <summary>
+/// BGM player UI for one room. Pure view: all playback + sync lives in <see cref="BgmCoordinator"/>
+/// (driven every framework tick, independent of this window). Controls just call the coordinator.
+/// </summary>
 public class BgmPlayerWindow : Window, IDisposable
 {
-    private readonly Plugin plugin;
-    private BgmService? bgmService;
-    private RpRoom?     room;
+    private readonly Plugin _plugin;
+    private readonly BgmService _bgm;
+    private string? _code;
+    private string  _addUrl = "";
 
-    // Add-song modal
-    private bool   pendingAddSong;
-    private bool   addSongOpen  = true;
-    private string addSongUrl   = string.Empty;
-    private bool   addSongLoading;
-
-    // Seek slider drag state
-    private bool  _seekDragging;
-    private float _seekDragValue;
-
-    // Network: live member list maintained by NetworkService events
-    private readonly List<RoomMemberDto> members = new();
-
-    // Whether local player is owner/admin in this room
-    private bool isAuthority;
-    // Whether local player is currently in the server session (not disconnected via Leave)
-    private bool isInRoom;
-
-    public BgmPlayerWindow(Plugin plugin)
-        : base("RP BGM Player##RPFramework.BGMPlayer")
+    public BgmPlayerWindow(Plugin plugin) : base("BGM Player##RPFramework.BgmPlayer")
     {
-        this.plugin = plugin;
-        SizeConstraints = new WindowSizeConstraints
-        {
-            MinimumSize = new Vector2(320, 400),
-            MaximumSize = new Vector2(800, 1000),
-        };
-        Size          = new Vector2(420, 500);
+        _plugin = plugin;
+        _bgm    = plugin.BgmService;
+        SizeConstraints = new WindowSizeConstraints { MinimumSize = new Vector2(320, 280), MaximumSize = new Vector2(700, 900) };
+        Size          = new Vector2(360, 420);
         SizeCondition = ImGuiCond.FirstUseEver;
-        IsOpen        = false;
-
-        // Subscribe to network events
-        plugin.Network.BgmRoomStateReceived  += OnRoomState;
-        plugin.Network.BgmMemberJoined       += OnMemberJoined;
-        plugin.Network.BgmMemberLeft         += OnMemberLeft;
-        plugin.Network.BgmMemberRoleChanged  += OnMemberRoleChanged;
-        plugin.Network.BgmPlaybackCommand    += OnPlaybackCommand;
-        plugin.Network.BgmSongAdded          += OnSongAdded;
-        plugin.Network.BgmSongRemoved        += OnSongRemoved;
-        plugin.Network.Connected             += OnNetworkConnected;
-        plugin.Network.Reconnected           += OnNetworkReconnected;
     }
 
-    public void OpenRoom(RpRoom rpRoom, BgmService svc, bool autoJoin = true)
-    {
-        room       = rpRoom;
-        bgmService = svc;
-        WindowName = $"{rpRoom.Name}##RPFramework.BGMPlayer";
-        members.Clear();
-        RefreshAuthority();
+    public void Dispose() { }
 
-        if (autoJoin && plugin.Network.IsConnected)
-            Task.Run(() => plugin.Network.BgmJoinAsync(rpRoom.Code));
-    }
-
-    public void Dispose()
-    {
-        plugin.Network.BgmRoomStateReceived -= OnRoomState;
-        plugin.Network.BgmMemberJoined      -= OnMemberJoined;
-        plugin.Network.BgmMemberLeft        -= OnMemberLeft;
-        plugin.Network.BgmMemberRoleChanged -= OnMemberRoleChanged;
-        plugin.Network.BgmPlaybackCommand   -= OnPlaybackCommand;
-        plugin.Network.BgmSongAdded         -= OnSongAdded;
-        plugin.Network.BgmSongRemoved       -= OnSongRemoved;
-        plugin.Network.Connected            -= OnNetworkConnected;
-        plugin.Network.Reconnected          -= OnNetworkReconnected;
-    }
-
-    // ── Network handlers (called on framework thread) ─────────────────────────
-
-    private void OnRoomState(RoomStateDto state)
-    {
-        if (room == null || state.Code != room.Code) return;
-        members.Clear();
-        members.AddRange(state.Members);
-        RefreshAuthority();
-
-        if (!isAuthority)
-        {
-            // Non-authority: merge server playlist by ID to avoid wiping songs that
-            // arrived via OnSongAdded before this state packet completed.
-            var serverIds = new System.Collections.Generic.HashSet<Guid>(
-                state.Playlist.ConvertAll(d => d.Id));
-            room.Playlist.RemoveAll(s => !serverIds.Contains(s.Id));
-            for (int i = 0; i < state.Playlist.Count; i++)
-            {
-                var dto = state.Playlist[i];
-                if (!room.Playlist.Exists(s => s.Id == dto.Id))
-                    room.Playlist.Insert(
-                        Math.Min(i, room.Playlist.Count),
-                        new RpSong { Id = dto.Id, Title = dto.Title, YoutubeUrl = dto.YoutubeUrl });
-            }
-            plugin.Configuration.Save();
-        }
-        else if (state.Playlist.Count < room.Playlist.Count)
-        {
-            // Authority reconnecting to a server that lost its state (restart / session expiry).
-            // Re-upload any songs the server is missing.
-            var code    = room.Code;
-            var missing = room.Playlist.GetRange(
-                state.Playlist.Count, room.Playlist.Count - state.Playlist.Count);
-            Task.Run(async () =>
-            {
-                foreach (var s in missing)
-                    await plugin.Network.BgmSendAddSong(code, new RpSongDto(s.Id, s.Title, s.YoutubeUrl));
-            });
-        }
-
-        // Sync playback: only if the local player is confirmed in the state's member list as a
-        // non-authority member. Skipping when the local player is absent from state.Members
-        // avoids auto-starting music during the brief window before the server echoes our join.
-        string? localIdForSync = plugin.LocalPlayerId;
-        var selfInState = localIdForSync != null
-            ? state.Members.Find(m => m.PlayerId == localIdForSync)
-            : null;
-        bool localIsAuthority = selfInState?.Role is RoomRole.Owner or RoomRole.Admin;
-        if (selfInState != null && !localIsAuthority && bgmService != null)
-            ApplyPlaybackState(state.CurrentIndex, state.IsPlaying, state.PositionSeconds, state.ServerTimestamp);
-    }
-
-    private void OnMemberJoined(string code, RoomMemberDto member)
-    {
-        if (room?.Code != code) return;
-        members.RemoveAll(m => m.PlayerId == member.PlayerId);
-        members.Add(member);
-        RefreshAuthority();
-    }
-
-    private void OnMemberLeft(string code, string playerId)
-    {
-        if (room?.Code != code) return;
-        members.RemoveAll(m => m.PlayerId == playerId);
-        RefreshAuthority();
-    }
-
-    private void OnMemberRoleChanged(string code, RoomMemberDto updated)
-    {
-        if (room?.Code != code) return;
-        var idx = members.FindIndex(m => m.PlayerId == updated.PlayerId);
-        if (idx >= 0) members[idx] = updated;
-        RefreshAuthority();
-    }
-
-    private void OnSongAdded(string code, RpSongDto dto, int idx)
-    {
-        if (room?.Code != code) return;
-        // Server sends OnBgmSongAdded to OthersInGroup, so authority normally won't receive this.
-        // Dedup by Id handles any edge case where it arrives anyway.
-        if (room.Playlist.Exists(s => s.Id == dto.Id)) return;
-        var song = new RpSong { Id = dto.Id, Title = dto.Title, YoutubeUrl = dto.YoutubeUrl };
-        if (idx >= 0 && idx <= room.Playlist.Count)
-            room.Playlist.Insert(idx, song);
-        else
-            room.Playlist.Add(song);
-        plugin.Configuration.Save();
-    }
-
-    private void OnSongRemoved(string code, Guid songId)
-    {
-        if (room?.Code != code) return;
-        room.Playlist.RemoveAll(s => s.Id == songId);
-        plugin.Configuration.Save();
-    }
-
-    private void OnPlaybackCommand(string code, PlaybackCommandDto cmd)
-    {
-        if (room?.Code != code || bgmService == null || isAuthority) return;
-
-        switch (cmd.CommandType)
-        {
-            case PlaybackCommandType.Play:
-            case PlaybackCommandType.Resume:
-                ApplyPlaybackState(cmd.SongIndex, true, cmd.PositionSeconds, cmd.ServerTimestamp);
-                break;
-            case PlaybackCommandType.Pause:
-                bgmService.SeekTo(cmd.PositionSeconds);
-                if (bgmService.IsPlaying)
-                    bgmService.PlayPause(); // pause
-                break;
-            case PlaybackCommandType.Stop:
-                bgmService.Stop();
-                break;
-            case PlaybackCommandType.Seek:
-                bgmService.SeekTo(AdjustedPosition(cmd.PositionSeconds, cmd.ServerTimestamp));
-                break;
-            case PlaybackCommandType.LoopChanged when cmd.Loop.HasValue:
-                if (room != null)
-                    room.Loop = cmd.Loop.Value switch
-                    {
-                        NetLoopMode.Single => LoopMode.Single,
-                        NetLoopMode.All    => LoopMode.All,
-                        _                  => LoopMode.None,
-                    };
-                break;
-        }
-    }
-
-    private void ApplyPlaybackState(int songIndex, bool isPlaying, double positionSeconds, long serverTimestamp)
-    {
-        if (bgmService == null || room == null) return;
-        double adjusted = AdjustedPosition(positionSeconds, serverTimestamp);
-
-        bool wrongSong = songIndex != bgmService.CurrentSongIndex || bgmService.CurrentRoom != room;
-
-        if (isPlaying)
-        {
-            if (songIndex >= 0 && songIndex < room.Playlist.Count && wrongSong)
-                bgmService.PlayRoom(room, songIndex); // load correct song; seek handled post-load
-            else
-            {
-                bgmService.SeekTo(adjusted);          // snap to owner's position unconditionally
-                if (!bgmService.IsPlaying) bgmService.PlayPause();
-            }
-        }
-        else
-        {
-            if (bgmService.IsPlaying) bgmService.PlayPause(); // force pause/stop
-            bgmService.SeekTo(adjusted);
-        }
-    }
-
-    private static double AdjustedPosition(double positionSecs, long serverTimestamp)
-    {
-        long elapsedMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - serverTimestamp;
-        return positionSecs + Math.Max(0, elapsedMs / 1000.0);
-    }
-
-    private void OnNetworkConnected()
-    {
-        if (room == null) return;
-        // Identify already ran during ConnectAsync — no need to re-check LocalPlayerId here
-        Task.Run(() => plugin.Network.BgmJoinAsync(room.Code));
-    }
-
-    private void OnNetworkReconnected()
-    {
-        // NetworkService already re-sent BgmJoin during reconnect — do NOT call BgmJoinAsync again
-        // (that would trigger a second OnBgmRoomState with 0 songs, clearing the playlist).
-        // Just reset authority until the incoming OnBgmRoomState re-establishes it.
-        isAuthority = false;
-    }
-
-    private void RefreshAuthority()
-    {
-        string? localId = plugin.LocalPlayerId;
-        if (localId == null) { isAuthority = true; isInRoom = false; return; }
-
-        if (!plugin.Network.IsConnected) { isAuthority = true; isInRoom = false; return; }
-
-        var self = members.Find(m => m.PlayerId == localId);
-        isInRoom    = self != null;
-        isAuthority = self?.Role is RoomRole.Owner or RoomRole.Admin;
-    }
-
-    // ═════════════════════════════════════════════════════════════════════════
-    // Draw
-    // ═════════════════════════════════════════════════════════════════════════
+    public void OpenRoom(string code) { _plugin.Bgm.SetActiveRoom(code); _code = code; IsOpen = true; }
 
     public override void Draw()
     {
-        if (room == null || bgmService == null)
-        {
-            ImGui.TextDisabled("No room selected.");
-            return;
-        }
+        var room = _plugin.Store.Room(_code);
+        if (_code == null || room == null) { ImGui.TextDisabled("Not in a BGM room."); return; }
 
-        if (pendingAddSong)
-        {
-            addSongOpen    = true;
-            addSongLoading = false;
-            addSongUrl     = string.Empty;
-            ImGui.OpenPopup("##bgm_addsong");
-            pendingAddSong = false;
-        }
+        var   bgm     = _plugin.Bgm;
+        bool  control = bgm.CanControl(_plugin.LocalPlayerId);
+        float scale   = ImGuiHelpers.GlobalScale;
 
-        // End-of-playlist broadcast: authority needs to tell members to stop
-        if (isAuthority && bgmService.PendingStopBroadcast)
-        {
-            bgmService.PendingStopBroadcast = false;
-            SyncStop();
-        }
-
-        // Code row
-        ImGui.TextDisabled("Code:");
-        ImGui.SameLine();
-        ImGui.TextUnformatted(room.Code);
-        ImGui.SameLine();
-        if (ImGui.SmallButton("Copy##bgmplayercode"))
-            ImGui.SetClipboardText(room.Code);
-
-        // Connection status indicator
-        if (plugin.Network.IsConnected)
-        {
-            ImGui.SameLine();
-            ImGui.TextColored(new Vector4(0.3f, 0.85f, 0.3f, 1f), "●");
-            if (ImGui.IsItemHovered()) ImGui.SetTooltip("Connected to relay");
-
-            // Leave room — disconnect from server session without deleting the local room
-            ImGui.SameLine();
-            if (isInRoom)
-            {
-                if (ImGui.SmallButton("Leave##bgmleave"))
-                {
-                    string code = room.Code;
-                    Task.Run(() => plugin.Network.BgmLeaveAsync(code));
-                    bgmService?.Stop();
-                    members.Clear();
-                    RefreshAuthority();
-                }
-                if (ImGui.IsItemHovered()) ImGui.SetTooltip("Disconnect from this room's session (keeps your local room)");
-            }
-            else
-            {
-                if (ImGui.SmallButton("Join##bgmrejoin"))
-                {
-                    string code = room.Code;
-                    Task.Run(() => plugin.Network.BgmJoinAsync(code));
-                }
-                if (ImGui.IsItemHovered()) ImGui.SetTooltip("Join the room session");
-            }
-        }
-        else
-        {
-            ImGui.SameLine();
-            ImGui.TextColored(new Vector4(0.6f, 0.6f, 0.6f, 1f), "●");
-            if (ImGui.IsItemHovered()) ImGui.SetTooltip("Not connected — click to connect");
-            if (ImGui.IsItemClicked())
-            {
-                string  url  = plugin.Configuration.ServerUrl;
-                string? id   = plugin.LocalPlayerId;
-                string  name = plugin.LocalDisplayName;
-                if (id != null)
-                    Task.Run(() => plugin.Network.ConnectAsync(url, id, name));
-            }
-        }
-
+        ImGui.TextUnformatted(room.Name);
+        ImGui.SameLine(); ImGui.TextDisabled($"({room.Code})");
+        ImGui.SameLine(); if (ImGui.SmallButton("Copy##bgmcopy")) ImGui.SetClipboardText(room.Code);
+        ImGui.SameLine(); if (ImGui.SmallButton("Leave##bgmleave")) { bgm.LeaveActive(); IsOpen = false; }
         ImGui.Separator();
-        DrawControls();
-        ImGui.Separator();
-        DrawTabs();
 
-        DrawAddSongModal();
-    }
-
-    // ── Transport controls ────────────────────────────────────────────────────
-
-    private void DrawControls()
-    {
-        if (bgmService == null || room == null) return;
-
-        bool loading = bgmService.IsLoading;
-        bool playing = bgmService.IsPlaying && bgmService.CurrentRoom == room;
-        bool muted   = bgmService.IsMuted;
-
-        // Members who are not owner/admin cannot issue transport commands
-        if (!isAuthority) ImGui.BeginDisabled();
-
-        // Mute (always available, even to members — it's client-side)
-        if (!isAuthority) ImGui.EndDisabled();
-        if (ImGui.Button(muted ? "[M]##bgmmute" : "[ ]##bgmmute"))
-            bgmService.ToggleMute();
-        if (ImGui.IsItemHovered()) ImGui.SetTooltip(muted ? "Unmute" : "Mute");
-        ImGui.SameLine();
-        if (!isAuthority) ImGui.BeginDisabled();
-
-        // Previous
-        if (ImGui.Button("|<##bgmprev")) { bgmService.Previous(); SyncPlay(); }
-        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Previous");
-        ImGui.SameLine();
-
-        // Play / Pause
-        string ppLabel = loading
-            ? $"{(int)(bgmService.DownloadProgress * 100)}%##bgmpp"
-            : playing ? "||##bgmpp" : " >##bgmpp";
-        if (loading) ImGui.BeginDisabled();
-        if (ImGui.Button(ppLabel, new Vector2(38 * ImGuiHelpers.GlobalScale, 0)))
+        using (var pl = ImRaii.Child("##bgmplaylist", new Vector2(-1, -110 * scale), true))
         {
-            bgmService.PlayPause();
-            if (!loading) SyncPlayPause(playing);
-        }
-        if (loading) ImGui.EndDisabled();
-        if (ImGui.IsItemHovered()) ImGui.SetTooltip(loading ? "Downloading..." : playing ? "Pause" : "Play");
-        ImGui.SameLine();
-
-        // Stop
-        if (ImGui.Button("■##bgmstop")) { bgmService.Stop(); SyncStop(); }
-        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Stop");
-        ImGui.SameLine();
-
-        // Next
-        if (ImGui.Button(">|##bgmnext")) { bgmService.Next(); SyncPlay(); }
-        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Next");
-        ImGui.SameLine();
-
-        // Loop
-        string loopLbl = room.Loop switch
-        {
-            LoopMode.Single => "[1]##bgmloop",
-            LoopMode.All    => "[*]##bgmloop",
-            _               => "[ ]##bgmloop",
-        };
-        if (ImGui.Button(loopLbl))
-        {
-            room.Loop = room.Loop switch
+            if (pl)
             {
-                LoopMode.None   => LoopMode.Single,
-                LoopMode.Single => LoopMode.All,
-                _               => LoopMode.None,
-            };
-            plugin.Configuration.Save();
-            SyncLoop();
+                for (int i = 0; i < room.Playlist.Count; i++)
+                {
+                    var song = room.Playlist[i];
+                    bool cur = i == room.CurrentIndex;
+                    if (cur) ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(0.4f, 0.85f, 1f, 1f));
+                    if (ImGui.Selectable($"{(cur ? "♪ " : "  ")}{song.Title}##song_{song.Id}", cur) && control)
+                        bgm.PlayIndex(i);
+                    if (cur) ImGui.PopStyleColor();
+                    if (control && ImGui.BeginPopupContextItem($"##sc_{song.Id}"))
+                    {
+                        if (ImGui.MenuItem("Remove")) _ = _plugin.Network.PlaylistRemove(room.Code, song.Id);
+                        ImGui.EndPopup();
+                    }
+                }
+                if (room.Playlist.Count == 0) ImGui.TextDisabled("Playlist is empty.");
+            }
         }
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip($"Loop: {room.Loop}  (click to cycle)");
-        ImGui.SameLine();
 
-        // Add song
-        if (ImGui.Button("+##bgmadd")) pendingAddSong = true;
-        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Add song");
+        if (_bgm.IsLoading) ImGui.TextDisabled($"Loading… {_bgm.DownloadProgress * 100:0}%");
+        else if (_bgm.LoadError != null) ImGui.TextColored(new Vector4(1f, 0.4f, 0.4f, 1f), _bgm.LoadError);
 
-        if (!isAuthority) ImGui.EndDisabled();
+        using (ImRaii.Disabled(!control))
+        {
+            if (ImGui.Button("<<##prev")) bgm.Prev();
+            ImGui.SameLine();
+            if (ImGui.Button(_bgm.IsPlaying ? "Pause##pp" : "Play##pp")) bgm.TogglePlayPause();
+            ImGui.SameLine();
+            if (ImGui.Button(">>##next")) bgm.Next();
+            ImGui.SameLine();
+            if (ImGui.Button("Stop##stop")) bgm.Stop();
+            ImGui.SameLine();
+            int loopI = (int)room.Loop;
+            ImGui.SetNextItemWidth(90 * scale);
+            if (ImGui.Combo("##loop", ref loopI, new[] { "No Loop", "Loop One", "Loop All" }, 3))
+                bgm.SetLoop((LoopMode)loopI);
+        }
 
-        // Load error
-        if (bgmService.LoadError is { } err)
-            ImGui.TextColored(new Vector4(1f, 0.35f, 0.35f, 1f), err);
-
-        // Volume slider (always client-side)
-        float vol = room.Volume * 100f;
+        // Volume runs in 0–100% space (a 0–1 range + "%.0f" would round to only 0 and 1).
+        float volPct = _plugin.Configuration.BgmVolume * 100f;
         ImGui.SetNextItemWidth(-1);
-        if (ImGui.SliderFloat("##bgmvol", ref vol, 0f, 100f, "%.0f%%"))
+        if (ImGui.SliderFloat("##vol", ref volPct, 0f, 100f, "Volume %.0f%%"))
         {
-            room.Volume = vol / 100f;
-            bgmService.SetVolume(room.Volume);
+            _plugin.Configuration.BgmVolume = Math.Clamp(volPct / 100f, 0f, 1f);
+            _bgm.SetVolume(_plugin.Configuration.BgmVolume);
         }
-        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Volume (local only)");
+        if (ImGui.IsItemDeactivatedAfterEdit()) _plugin.Configuration.Save();
 
-        // Seek slider — visible when a song is loaded; interactive for authority only
-        double totalSecs = bgmService.TotalDurationSeconds;
-        if (totalSecs > 0)
+        if (control)
         {
-            if (!isAuthority) ImGui.BeginDisabled();
-
-            float seekPos = _seekDragging ? _seekDragValue : (float)bgmService.CurrentPositionSeconds;
-            float seekTot = (float)totalSecs;
-            string timeLabel = $"{TimeSpan.FromSeconds(seekPos):mm\\:ss} / {TimeSpan.FromSeconds(seekTot):mm\\:ss}";
-            ImGui.SetNextItemWidth(-1);
-            if (ImGui.SliderFloat("##bgmseek", ref seekPos, 0f, seekTot, timeLabel))
-            {
-                _seekDragging  = true;
-                _seekDragValue = seekPos;
-                bgmService.SeekTo(seekPos);
-            }
-            if (ImGui.IsItemDeactivatedAfterEdit())
-            {
-                _seekDragging = false;
-                SyncSeek(_seekDragValue);
-            }
-            if (!ImGui.IsItemActive())
-                _seekDragging = false;
-            if (ImGui.IsItemHovered()) ImGui.SetTooltip("Seek");
-
-            if (!isAuthority) ImGui.EndDisabled();
-        }
-    }
-
-    // ── Sync helpers: only fires if connected and authority ───────────────────
-
-    private void SyncPlay()
-    {
-        if (!isAuthority || !plugin.Network.IsConnected || room == null || bgmService == null) return;
-        Task.Run(() => plugin.Network.BgmSyncPlay(
-            room.Code, bgmService.CurrentSongIndex, bgmService.CurrentPositionSeconds));
-    }
-
-    private void SyncPlayPause(bool wasPLaying)
-    {
-        if (!isAuthority || !plugin.Network.IsConnected || room == null || bgmService == null) return;
-        double pos = bgmService.CurrentPositionSeconds;
-        if (wasPLaying)
-            Task.Run(() => plugin.Network.BgmSyncPause(room.Code, pos));
-        else
-            Task.Run(() => plugin.Network.BgmSyncResume(room.Code, pos));
-    }
-
-    private void SyncStop()
-    {
-        if (!isAuthority || !plugin.Network.IsConnected || room == null) return;
-        Task.Run(() => plugin.Network.BgmSyncStop(room.Code));
-    }
-
-    private void SyncSeek(double positionSeconds)
-    {
-        if (!isAuthority || !plugin.Network.IsConnected || room == null) return;
-        Task.Run(() => plugin.Network.BgmSyncSeek(room.Code, positionSeconds));
-    }
-
-    private void SyncLoop()
-    {
-        if (!isAuthority || !plugin.Network.IsConnected || room == null) return;
-        NetLoopMode netLoop = room.Loop switch
-        {
-            LoopMode.Single => NetLoopMode.Single,
-            LoopMode.All    => NetLoopMode.All,
-            _               => NetLoopMode.None,
-        };
-        Task.Run(() => plugin.Network.BgmSyncLoopMode(room.Code, netLoop));
-    }
-
-    // ── Tabs ─────────────────────────────────────────────────────────────────
-
-    private void DrawTabs()
-    {
-        using var tabBar = ImRaii.TabBar("##bgmtabs");
-        if (!tabBar) return;
-
-        using (var t = ImRaii.TabItem("Playlist##bgmpl"))
-            if (t) DrawPlaylistTab();
-
-        using (var t = ImRaii.TabItem("Members##bgmmembers"))
-            if (t) DrawMembersTab();
-    }
-
-    private void DrawPlaylistTab()
-    {
-        if (room == null || bgmService == null) return;
-
-        var  playlist      = room.Playlist;
-        bool isCurrentRoom = bgmService.CurrentRoom == room;
-
-        using var child = ImRaii.Child("##bgmplaylist", new Vector2(-1, -1));
-        if (!child) return;
-
-        for (int i = 0; i < playlist.Count; i++)
-        {
-            var  song      = playlist[i];
-            bool isCurrent = isCurrentRoom && bgmService.CurrentSongIndex == i;
-
-            ImGui.PushID($"##bgms{song.Id}");
-
-            if (isCurrent)
-                ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(0.3f, 0.85f, 0.3f, 1f));
-
-            string label = $"{(isCurrent ? "> " : "  ")}{i + 1}. {song.Title}";
-            bool   sel   = ImGui.Selectable(label, isCurrent, ImGuiSelectableFlags.AllowDoubleClick);
-
-            if (isCurrent) ImGui.PopStyleColor();
-
-            if (sel && ImGui.IsMouseDoubleClicked(ImGuiMouseButton.Left) && isAuthority)
-            {
-                bgmService.PlayRoom(room!, i);
-                SyncPlay();
-            }
-
-            // Right-click → remove (authority only)
-            if (ImGui.BeginPopupContextItem("##bgmsongctx"))
-            {
-                if (!isAuthority) ImGui.BeginDisabled();
-                if (ImGui.MenuItem("Remove"))
+            ImGui.SetNextItemWidth(-70 * scale);
+            ImGui.InputTextWithHint("##addurl", "YouTube URL…", ref _addUrl, 512);
+            ImGui.SameLine();
+            using (ImRaii.Disabled(!BgmService.IsAllowedYoutubeUrl(_addUrl)))
+                if (ImGui.Button("Add##addsong", new Vector2(60 * scale, 0)))
                 {
-                    if (isCurrentRoom && bgmService.CurrentSongIndex == i) bgmService.Stop();
-                    Guid removedId = song.Id;
-                    playlist.RemoveAt(i);
-                    plugin.Configuration.Save();
-                    if (plugin.Network.IsConnected && room != null)
-                        Task.Run(() => plugin.Network.BgmSendRemoveSong(room.Code, removedId));
-                    ImGui.CloseCurrentPopup();
+                    string url = _addUrl.Trim(); string code = room.Code;
+                    _addUrl = "";
+                    Task.Run(async () =>
+                    {
+                        string title = await BgmService.GetTitleAsync(url);
+                        await Plugin.Framework.RunOnFrameworkThread(() => _plugin.Network.PlaylistAdd(code, title, url));
+                    });
                 }
-                if (!isAuthority) ImGui.EndDisabled();
-                ImGui.EndPopup();
-            }
-
-            ImGui.PopID();
         }
-
-        if (playlist.Count == 0)
-            ImGui.TextDisabled("No songs. Click + to add one.");
-    }
-
-    private void DrawMembersTab()
-    {
-        string? localId = plugin.LocalPlayerId;
-
-        if (members.Count == 0)
-        {
-            string localName = plugin.LocalDisplayName;
-            ImGui.TextUnformatted($"{localName} (Owner — local only)");
-            ImGui.Spacing();
-            ImGui.TextDisabled("No other members connected.");
-            return;
-        }
-
-        using var child = ImRaii.Child("##bgmmembers", new Vector2(-1, -1));
-        if (!child) return;
-
-        foreach (var m in members)
-        {
-            bool isSelf = m.PlayerId == localId;
-            string roleTag = m.Role switch
-            {
-                RoomRole.Owner => " [Owner]",
-                RoomRole.Admin => " [Admin]",
-                _              => string.Empty,
-            };
-
-            if (isSelf) ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(0.4f, 0.85f, 1f, 1f));
-            ImGui.TextUnformatted($"{m.DisplayName}{roleTag}{(isSelf ? " (you)" : "")}");
-            if (isSelf) ImGui.PopStyleColor();
-
-            // Ownership is permanent and cannot be transferred.
-        }
-    }
-
-    // ── Add song modal ────────────────────────────────────────────────────────
-
-    private void DrawAddSongModal()
-    {
-        if (room == null) return;
-
-        var center = ImGui.GetMainViewport().GetCenter();
-        ImGui.SetNextWindowPos(center, ImGuiCond.Appearing, new Vector2(0.5f, 0.5f));
-        float w1 = 400 * ImGuiHelpers.GlobalScale;
-        ImGui.SetNextWindowSizeConstraints(new Vector2(w1, 0), new Vector2(w1, float.MaxValue));
-
-        if (!ImGui.BeginPopupModal("##bgm_addsong", ref addSongOpen,
-            ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoTitleBar))
-            return;
-
-        ImGui.TextUnformatted("Add Song");
-        ImGui.Separator();
-        ImGui.TextUnformatted("YouTube URL:");
-        ImGui.SetNextItemWidth(-1);
-        bool enter = ImGui.InputText("##bgmsongurl", ref addSongUrl, 512,
-            ImGuiInputTextFlags.EnterReturnsTrue);
-
-        bool validUrl = BgmService.IsAllowedYoutubeUrl(addSongUrl.Trim());
-        if (!string.IsNullOrWhiteSpace(addSongUrl) && !validUrl)
-            ImGui.TextColored(new Vector4(1f, 0.4f, 0.4f, 1f), "Only youtube.com / youtu.be links are supported.");
-
-        bool canAdd = validUrl && !addSongLoading;
-
-        if (!canAdd) ImGui.BeginDisabled();
-        if ((ImGui.Button(addSongLoading ? "Adding...##bgmaddok" : "Add##bgmaddok",
-                new Vector2(96, 0)) || enter) && canAdd)
-        {
-            string url = addSongUrl.Trim();
-            var song = new RpSong { Title = "Loading...", YoutubeUrl = url };
-            room.Playlist.Add(song);
-            plugin.Configuration.Save();
-            addSongLoading = true;
-
-            Task.Run(async () =>
-            {
-                string title = await BgmService.GetTitleAsync(url);
-                song.Title = title;
-                plugin.Configuration.Save();
-                addSongLoading = false;
-
-                // Broadcast song addition to room members
-                if (plugin.Network.IsConnected && room != null)
-                    await plugin.Network.BgmSendAddSong(room.Code,
-                        new RpSongDto(song.Id, song.Title, song.YoutubeUrl));
-            });
-
-            ImGui.CloseCurrentPopup();
-        }
-        if (!canAdd) ImGui.EndDisabled();
-
-        ImGui.SameLine();
-        if (ImGui.Button("Cancel##bgmaddcancel", new Vector2(96, 0)))
-            ImGui.CloseCurrentPopup();
-
-        ImGui.EndPopup();
     }
 }

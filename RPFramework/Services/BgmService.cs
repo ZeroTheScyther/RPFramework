@@ -10,7 +10,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using NAudio.Wave;
 using NAudio.Wave.SampleProviders;
-using RPFramework.Models;
+using System.Collections.Generic;
+using RPFramework.Contracts;
 using YoutubeExplode;
 using YoutubeExplode.Videos;
 
@@ -45,8 +46,11 @@ public class BgmService : IDisposable
     private WaveStream?           audioStream;
     private VolumeSampleProvider? volumeProvider;
 
-    private RpRoom? currentRoom;
-    private int     currentSongIndex = -1;
+    private string?         currentRoomCode;
+    private List<RpSongDto> playlist = new();
+    private LoopMode        loop   = LoopMode.None;
+    private float           volume = 0.5f;
+    private int             currentSongIndex = -1;
 
     private volatile bool  isLoading;
     private volatile bool  pendingAdvance;
@@ -103,8 +107,13 @@ public class BgmService : IDisposable
     public bool    IsLoading             => isLoading;
     public bool    IsMuted               => isMuted;
     public string? LoadError             => loadError;
-    public int     CurrentSongIndex      => currentSongIndex;
-    public RpRoom? CurrentRoom           => currentRoom;
+    public int      CurrentSongIndex     => currentSongIndex;
+    public string?  CurrentRoomCode      => currentRoomCode;
+    public LoopMode Loop                 => loop;
+    public float    Volume               => volume;
+    public void     SetLoop(LoopMode l)  => loop = l;
+    /// <summary>When false (listeners), a finished song does NOT auto-advance — the room drives playback.</summary>
+    public bool     AutoAdvance          { get; set; } = true;
     public float   DownloadProgress      => downloadProgress;
     /// <summary>Set when the last song in the playlist ends with no loop. Cleared by the caller after broadcasting.</summary>
     public bool    PendingStopBroadcast  { get => pendingStopBroadcast; set => pendingStopBroadcast = value; }
@@ -128,14 +137,20 @@ public class BgmService : IDisposable
 
     // ── Playback control ─────────────────────────────────────────────────────
 
-    public void PlayRoom(RpRoom room, int songIndex) { currentRoom = room; PlayAt(songIndex); }
+    /// <summary>Loads a room's playlist and starts playing the given index.</summary>
+    public void PlayRoom(string code, List<RpSongDto> pl, int songIndex)
+    {
+        currentRoomCode = code;
+        playlist        = pl ?? new();
+        PlayAt(songIndex);
+    }
 
     public void PlayPause()
     {
         if (isLoading) return;
         if (outputDevice == null)
         {
-            if (currentRoom?.Playlist.Count > 0) PlayAt(Math.Max(0, currentRoom.CurrentIndex));
+            if (playlist.Count > 0) PlayAt(Math.Max(0, currentSongIndex));
             return;
         }
         if (IsPlaying) outputDevice.Pause(); else outputDevice.Play();
@@ -143,42 +158,39 @@ public class BgmService : IDisposable
 
     public void Next()
     {
-        if (currentRoom == null) return;
+        if (playlist.Count == 0) return;
         int next = currentSongIndex + 1;
-        if (next >= currentRoom.Playlist.Count)
+        if (next >= playlist.Count)
         {
-            if (currentRoom.Loop == LoopMode.All) next = 0; else return;
+            if (loop == LoopMode.All) next = 0; else return;
         }
         PlayAt(next);
     }
 
     public void Previous()
     {
-        if (currentRoom == null) return;
+        if (playlist.Count == 0) return;
         int prev = currentSongIndex - 1;
-        if (prev < 0) prev = currentRoom.Loop == LoopMode.All ? currentRoom.Playlist.Count - 1 : 0;
+        if (prev < 0) prev = loop == LoopMode.All ? playlist.Count - 1 : 0;
         PlayAt(prev);
     }
 
     public void Stop()
     {
         StopPlayback();
-        if (currentRoom != null) currentRoom.CurrentIndex = -1;
         currentSongIndex = -1;
     }
 
     public void SetVolume(float vol)
     {
-        float v = Math.Clamp(vol, 0f, 1f);
-        if (currentRoom != null) currentRoom.Volume = v;
-        if (volumeProvider != null) volumeProvider.Volume = isMuted ? 0f : v;
+        volume = Math.Clamp(vol, 0f, 1f);
+        if (volumeProvider != null) volumeProvider.Volume = isMuted ? 0f : volume;
     }
 
     public void ToggleMute()
     {
         isMuted = !isMuted;
-        if (volumeProvider != null)
-            volumeProvider.Volume = isMuted ? 0f : (currentRoom?.Volume ?? 1.0f);
+        if (volumeProvider != null) volumeProvider.Volume = isMuted ? 0f : volume;
     }
 
     /// <summary>Current playback position in seconds. Used by the owner to report position to the server.</summary>
@@ -211,17 +223,16 @@ public class BgmService : IDisposable
 
     private void PlayAt(int index)
     {
-        if (currentRoom == null || currentRoom.Playlist.Count == 0) return;
-        if (index < 0 || index >= currentRoom.Playlist.Count) return;
+        if (playlist.Count == 0) return;
+        if (index < 0 || index >= playlist.Count) return;
 
-        currentSongIndex         = index;
-        currentRoom.CurrentIndex = index;
-        isLoading                = true;
-        loadError                = null;
-        downloadProgress         = 0f;
+        currentSongIndex = index;
+        isLoading        = true;
+        loadError        = null;
+        downloadProgress = 0f;
         StopPlayback();
 
-        string url = currentRoom.Playlist[index].YoutubeUrl;
+        string url = playlist[index].YoutubeUrl;
         Task.Run(async () => await LoadAndPlayAsync(url));
     }
 
@@ -259,7 +270,7 @@ public class BgmService : IDisposable
                 {
                     var stream  = new MediaFoundationReader(filePath);
                     var volProv = new VolumeSampleProvider(stream.ToSampleProvider())
-                        { Volume = isMuted ? 0f : (currentRoom?.Volume ?? 1.0f) };
+                        { Volume = isMuted ? 0f : volume };
                     var device  = new WaveOutEvent();
                     device.Init(volProv);
                     device.PlaybackStopped += OnPlaybackStopped;
@@ -288,18 +299,18 @@ public class BgmService : IDisposable
 
     private void AdvanceToNext()
     {
-        if (currentRoom == null || currentRoom.Playlist.Count == 0) return;
-        switch (currentRoom.Loop)
+        if (!AutoAdvance) return; // listeners follow the room, they don't advance themselves
+        if (playlist.Count == 0) return;
+        switch (loop)
         {
             case LoopMode.Single: PlayAt(currentSongIndex); break;
-            case LoopMode.All:    PlayAt((currentSongIndex + 1) % currentRoom.Playlist.Count); break;
+            case LoopMode.All:    PlayAt((currentSongIndex + 1) % playlist.Count); break;
             default:
-                if (currentSongIndex + 1 < currentRoom.Playlist.Count)
+                if (currentSongIndex + 1 < playlist.Count)
                     PlayAt(currentSongIndex + 1);
                 else
                 {
                     currentSongIndex = -1;
-                    if (currentRoom != null) currentRoom.CurrentIndex = -1;
                     pendingStopBroadcast = true;
                 }
                 break;

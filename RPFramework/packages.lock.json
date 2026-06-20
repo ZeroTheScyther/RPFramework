@@ -200,6 +200,9 @@
         "dependencies": {
           "NAudio.Core": "2.2.1"
         }
+      },
+      "rpframework.contracts": {
+        "type": "Project"
       }
     }
   }
