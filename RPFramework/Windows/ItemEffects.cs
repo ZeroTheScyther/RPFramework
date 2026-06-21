@@ -55,11 +55,40 @@ public static class ItemEffects
         var parts = new List<string>();
         foreach (var c in conditions)
         {
-            string field = template?.FindField(c.FieldId)?.Name ?? c.FieldId;
-            string op    = c.Op is >= 0 and <= ConditionOp.Greater ? CondOps[(int)c.Op] : "?";
-            string pct   = c.IsPercentage ? "%" : "";
+            if (c.FieldId == StatMath.OnTurnEndId) { parts.Add("On Turn End"); continue; }
+
+            var    sf    = template?.FindField(c.FieldId);
+            string field = sf?.Name ?? c.FieldId;
+
+            // Proficiency (Checkbox) tests read "X is true/false", not a numeric comparison.
+            if (sf?.Type == FieldType.Checkbox)
+            {
+                parts.Add($"{field} is {(c.Value >= 1f ? "true" : "false")}");
+                continue;
+            }
+
+            string op  = c.Op is >= 0 and <= ConditionOp.Greater ? CondOps[(int)c.Op] : "?";
+            string pct = c.IsPercentage ? "%" : "";
             parts.Add($"{field} {op} {c.Value:0.##}{pct}");
         }
         return string.Join(", ", parts);
+    }
+
+    /// <summary>
+    /// One human line per conditional block, e.g. "If HP &lt;= 50%: +20 STR" (or "Always: ..." when a
+    /// block has no conditions). Empty when there are no blocks. Used to extend item tooltips.
+    /// </summary>
+    public static List<string> BlockLines(IEnumerable<EffectBlock>? blocks, SheetTemplate? template)
+    {
+        var lines = new List<string>();
+        if (blocks == null) return lines;
+        foreach (var b in blocks)
+        {
+            string fx = Summary(b.Effects, template);
+            if (string.IsNullOrEmpty(fx)) continue;
+            string cond = ConditionSummary(b.Conditions, template);
+            lines.Add(string.IsNullOrEmpty(cond) ? $"Always: {fx}" : $"If {cond}: {fx}");
+        }
+        return lines;
     }
 }

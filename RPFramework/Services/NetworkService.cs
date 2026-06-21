@@ -119,6 +119,7 @@ public sealed class NetworkService : IDisposable
         _conn.On<PartyDto>(Ev.PartyUpdated,                p => Fire(() => _store.ApplyParty(p)));
         _conn.On<string>(Ev.PartyDisbanded,             code => Fire(() => _store.RemoveParty(code)));
         _conn.On<CharacterDto>(Ev.CharacterUpdated,        c => Fire(() => _store.ApplyCharacter(c)));
+        _conn.On<string, string>(Ev.CharacterRemoved, (code, eid) => Fire(() => _store.RemoveCharacter(code, eid)));
         _conn.On<TemplateDto>(Ev.TemplateUpdated,          t => Fire(() => _store.ApplyTemplate(t)));
         _conn.On<InitiativeStateDto>(Ev.InitiativeUpdated, i => Fire(() => _store.ApplyInitiative(i)));
         _conn.On<string>(Ev.InitiativeEnded,            code => Fire(() => _store.RemoveInitiative(code)));
@@ -149,16 +150,21 @@ public sealed class NetworkService : IDisposable
     public Task PartySetShowHpAp(string code, bool show)         => SafeInvoke(In.PartySetShowHpAp, code, show);
 
     // Character + template
-    public Task CharacterEditStat(string code, string key, int value)     => SafeInvoke(In.CharacterEditStat, code, key, value);
-    public Task CharacterEditCheck(string code, string fieldId, bool v)   => SafeInvoke(In.CharacterEditCheck, code, fieldId, v);
-    public Task CharacterEditText(string code, string fieldId, string v)  => SafeInvoke(In.CharacterEditText, code, fieldId, v);
-    public Task CharacterSetSkills(string code, List<RpSkill> skills)   => SafeInvoke(In.CharacterSetSkills, code, skills);
-    public Task UseSkill(string code, Guid skillId)                     => SafeInvoke(In.UseSkill, code, skillId);
+    public Task CharacterEditStat(string code, string entityId, string key, int value)     => SafeInvoke(In.CharacterEditStat, code, entityId, key, value);
+    public Task CharacterEditCheck(string code, string entityId, string fieldId, bool v)   => SafeInvoke(In.CharacterEditCheck, code, entityId, fieldId, v);
+    public Task CharacterEditText(string code, string entityId, string fieldId, string v)  => SafeInvoke(In.CharacterEditText, code, entityId, fieldId, v);
+    public Task CharacterSetSkills(string code, string entityId, List<RpSkill> skills)      => SafeInvoke(In.CharacterSetSkills, code, entityId, skills);
+    public Task UseSkill(string code, string entityId, Guid skillId)                        => SafeInvoke(In.UseSkill, code, entityId, skillId);
     public Task TemplatePublish(string code, SheetTemplate template)    => SafeInvoke(In.TemplatePublish, code, template);
 
+    // Entities (companions / NPCs)
+    public Task EntityCreate(string code, EntityKind kind, string name) => SafeInvoke(In.EntityCreate, code, kind, name);
+    public Task EntityRename(string code, string entityId, string name) => SafeInvoke(In.EntityRename, code, entityId, name);
+    public Task EntityDelete(string code, string entityId)              => SafeInvoke(In.EntityDelete, code, entityId);
+
     // Dice
-    public Task RollDice(string code, int die, RollMode mode, string? statFieldId, string? specFieldId)
-        => SafeInvoke(In.RollDice, code, die, mode, statFieldId, specFieldId);
+    public Task RollDice(string code, string entityId, int die, RollMode mode, string? statFieldId, string? specFieldId)
+        => SafeInvoke(In.RollDice, code, entityId, die, mode, statFieldId, specFieldId);
 
     // Initiative
     public Task InitiativeStart(string code)     => SafeInvoke(In.InitiativeStart, code);

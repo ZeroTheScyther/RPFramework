@@ -32,11 +32,14 @@ public record PartyDto(
 // ── Character & template ─────────────────────────────────────────────────────
 
 public record CharacterDto(
-    string         PartyCode,
-    string         PlayerId,
-    string         DisplayName,
-    CharacterState State,
-    long           Version
+    string           PartyCode,
+    string           EntityId,
+    string           DisplayName,
+    CharacterState   State,
+    long             Version,
+    EntityKind       Kind       = EntityKind.PlayerCharacter,
+    string           OwnerPlayerId = "",
+    EntityVisibility Visibility = EntityVisibility.PartyVisible
 );
 
 public record TemplateDto(
@@ -96,8 +99,9 @@ public record RpItemDto(
     RpItemType            Type       = RpItemType.Normal,
     int                   Capacity   = 10,
     List<RpItemDto>?      Contents   = null,
-    List<SkillEffect>?    Effects    = null,  // stat effects for equippable/consumable items (null = none)
-    List<SkillCondition>? Conditions = null   // equipped gear: effects apply only while ALL are met (null/empty = always-on)
+    List<SkillEffect>?    Effects    = null,  // base-block stat effects for equippable/consumable items (null = none)
+    List<SkillCondition>? Conditions = null,  // base-block gate: base Effects apply only while ALL are met (null/empty = always-on)
+    List<EffectBlock>?    Blocks     = null   // extra independent if-blocks (equipment), summed when their conditions hold
 );
 
 public record BagDto(

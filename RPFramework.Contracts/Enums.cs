@@ -13,6 +13,17 @@ public enum SkillType   { Active, Passive }
 public enum ConditionOp { Less, LessEqual, Equal, GreaterEqual, Greater }
 public enum EffectOp    { Add, Subtract, Set, Multiply, Divide }
 
+// ── Entities (characters / NPCs / companions) ────────────────────────────────────
+
+/// <summary>Kind of in-world entity sharing the character model. PlayerCharacter: EntityId == owning
+/// player id, one per player per campaign. Npc: DM-owned (OwnerPlayerId empty), a GUID EntityId.
+/// Companion: player-owned (OwnerPlayerId = the player), a GUID EntityId; a player may have several.</summary>
+public enum EntityKind { PlayerCharacter, Npc, Companion }
+
+/// <summary>Who may see an entity within its campaign. PartyVisible: the whole party. DmOnly: only the
+/// DM / co-DMs (used for hidden NPCs the players shouldn't see yet).</summary>
+public enum EntityVisibility { PartyVisible, DmOnly }
+
 // ── Dice ────────────────────────────────────────────────────────────────────────
 
 /// <summary>How a dice roll handles its two-roll modes.</summary>

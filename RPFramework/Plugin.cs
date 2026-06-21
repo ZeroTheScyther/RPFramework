@@ -32,7 +32,7 @@ public sealed class Plugin : IDalamudPlugin
         CmdInventoryShort = "/rpinv", CmdBgm = "/rpbgm", CmdSettings = "/rpsettings",
         CmdSheet = "/rpsheet", CmdSheetShort = "/rpcs", CmdStats = "/rpstats", CmdDice = "/rpdice",
         CmdSkills = "/rpskills", CmdSkillsShort = "/rpsk", CmdEquipment = "/rpequipment",
-        CmdCharacter = "/rpcharacter", CmdHelp = "/rphelp";
+        CmdCharacter = "/rpcharacter", CmdNpc = "/rpnpc", CmdHelp = "/rphelp";
     private const string DefaultServerUrl = "https://rpframework.example.com";
 
     public Configuration Configuration { get; init; }
@@ -55,6 +55,7 @@ public sealed class Plugin : IDalamudPlugin
     private DiceRollerWindow        DiceRollerWindow        { get; }
     internal SkillsWindow           SkillsWindow            { get; }
     internal RpCharacterWindow      RpCharacterWindow       { get; }
+    internal RpNpcWindow            RpNpcWindow             { get; }
     private HelpWindow              HelpWindow              { get; }
 
     // Dynamic read-only windows for remote players, keyed by playerId
@@ -97,13 +98,14 @@ public sealed class Plugin : IDalamudPlugin
         DiceRollerWindow        = new DiceRollerWindow(this);
         SkillsWindow            = new SkillsWindow(this);
         RpCharacterWindow       = new RpCharacterWindow(this);
+        RpNpcWindow             = new RpNpcWindow(this);
         HelpWindow              = new HelpWindow();
 
         foreach (var w in new Window[]
         {
             HubWindow, InitiativeWindow, InventoryWindow, BgmWindow, BgmPlayerWindow,
             TradeNotificationWindow, BagShareInviteWindow, SettingsWindow, CharacterSheetWindow,
-            DiceRollerWindow, SkillsWindow, RpCharacterWindow, HelpWindow,
+            DiceRollerWindow, SkillsWindow, RpCharacterWindow, RpNpcWindow, HelpWindow,
         }) WindowSystem.AddWindow(w);
 
         Network.Connected              += OnConnected;
@@ -130,6 +132,7 @@ public sealed class Plugin : IDalamudPlugin
         AddCommand(CmdSkills, OnSkillsCmd, "Opens the RP Character window (Skills tab)");
         AddCommand(CmdSkillsShort, OnSkillsCmd, "Opens the RP Character window (Skills tab)");
         AddCommand(CmdEquipment, OnEquipmentCmd, "Opens the RP Character window (Equipment tab)");
+        AddCommand(CmdNpc, OnNpcCmd, "Opens the RPNPC vault — manage companions and swap your active one");
         AddCommand(CmdIni, OnIniCmd, "Opens the RP Initiative tracker");
         AddCommand(CmdHelp, OnHelpCmd, "Opens the RPFramework help window");
 
@@ -171,13 +174,13 @@ public sealed class Plugin : IDalamudPlugin
         {
             HubWindow, InitiativeWindow, InventoryWindow, BgmWindow, BgmPlayerWindow,
             TradeNotificationWindow, BagShareInviteWindow, SettingsWindow, CharacterSheetWindow,
-            DiceRollerWindow, SkillsWindow, RpCharacterWindow, BgmService, Network,
+            DiceRollerWindow, SkillsWindow, RpCharacterWindow, RpNpcWindow, BgmService, Network,
         }) w.Dispose();
 
         foreach (var cmd in new[]
         {
             CmdHub, CmdInventory, CmdInventoryShort, CmdBgm, CmdSettings, CmdSheet, CmdSheetShort,
-            CmdStats, CmdDice, CmdSkills, CmdSkillsShort, CmdEquipment, CmdCharacter, CmdIni, CmdHelp,
+            CmdStats, CmdDice, CmdSkills, CmdSkillsShort, CmdEquipment, CmdCharacter, CmdNpc, CmdIni, CmdHelp,
         }) CommandManager.RemoveHandler(cmd);
     }
 
@@ -216,6 +219,20 @@ public sealed class Plugin : IDalamudPlugin
             _autoConnectPending = false;
             Connect();
         }
+        AutoActivateSoleCampaign();
+    }
+
+    /// <summary>If the player has exactly one real (non-personal) campaign and no valid one is active,
+    /// make it active automatically — there's nothing to choose between, so joining your first campaign
+    /// shouldn't require a manual "set active" step.</summary>
+    private void AutoActivateSoleCampaign()
+    {
+        if (!Store.Hydrated) return;
+        bool haveValidActive = Configuration.ActiveCampaignCode != null
+                            && Store.Party(Configuration.ActiveCampaignCode) is { IsPersonal: false };
+        if (haveValidActive) return;
+        var reals = Store.Parties.Where(p => !p.IsPersonal).ToList();
+        if (reals.Count == 1) SetActiveCampaign(reals[0].Code);
     }
 
     private void OnLogin()
@@ -263,6 +280,22 @@ public sealed class Plugin : IDalamudPlugin
     public CharacterDto? ActiveCharacter
         => ActiveCampaign != null && LocalPlayerId != null ? Store.Character(ActiveCampaign, LocalPlayerId) : null;
 
+    /// <summary>The player's active companion in a campaign, if one is set AND still exists in the store
+    /// (a deleted companion silently resolves to none). Drives the conditional RPCHARACTER Companions tab.</summary>
+    public CharacterDto? ActiveCompanion(string? code)
+    {
+        if (code == null || !Configuration.ActiveCompanions.TryGetValue(code, out var id)) return null;
+        return Store.Character(code, id);
+    }
+
+    /// <summary>Sets (or with null, clears) the active companion for a campaign and persists it.</summary>
+    public void SetActiveCompanion(string code, string? entityId)
+    {
+        if (entityId == null) Configuration.ActiveCompanions.Remove(code);
+        else                  Configuration.ActiveCompanions[code] = entityId;
+        Configuration.Save();
+    }
+
     public PartyRole? MyRole(string? code)
     {
         var party = Store.Party(code);
@@ -303,6 +336,8 @@ public sealed class Plugin : IDalamudPlugin
     }
 
     private void OnEquipmentCmd(string c, string args) => RpCharacterWindow.OpenTo(RpCharacterWindow.Tab.Equipment);
+
+    private void OnNpcCmd(string c, string args) => RpNpcWindow.Toggle();
 
     private void OnDiceCmd(string c, string args)
     {

@@ -22,6 +22,16 @@ public class SkillsWindow : Window, IDisposable
     private readonly List<RpSkill> _draft = new();
     private int  _selectedIdx = -1;
     private bool _dirty;
+    private bool _editing;   // selected skill shows the read-only view until this is flipped on
+
+    // The entity whose skills are being edited (PC = LocalPlayerId, or a companion/NPC id). Set in DrawBody.
+    private string _code     = "";
+    private string _entityId = "";
+    private string _syncedId = "";   // entity the current draft was pulled for (re-sync when it changes)
+
+    /// <summary>The character the editor is currently bound to (target entity, falling back to the local PC).</summary>
+    private CharacterDto? TargetCharacter()
+        => _code.Length > 0 ? plugin.Store.Character(_code, _entityId) : plugin.ActiveCharacter;
 
     public SkillsWindow(Plugin plugin)
         : base("RP Skills & Passives##RPFramework.Skills",
@@ -44,46 +54,91 @@ public class SkillsWindow : Window, IDisposable
     private void SyncDraft()
     {
         _draft.Clear();
-        var ch = plugin.ActiveCharacter;
+        var ch = TargetCharacter();
         if (ch != null) _draft.AddRange(ch.State.Skills.Select(Clone));
-        _dirty = false;
+        _dirty    = false;
+        _editing  = false;
+        _syncedId = _entityId;
         if (_selectedIdx >= _draft.Count) _selectedIdx = _draft.Count - 1;
     }
 
-    private static RpSkill Clone(RpSkill s) => new()
+    private static SkillCondition CloneCond(SkillCondition c) => new() { FieldId = c.FieldId, Op = c.Op, Value = c.Value, IsPercentage = c.IsPercentage };
+    private static SkillEffect    CloneFx(SkillEffect e)      => new() { FieldId = e.FieldId, Op = e.Op, Value = e.Value, IsPercentage = e.IsPercentage };
+    private static EffectBlock    CloneBlock(EffectBlock b)   => new()
     {
-        Id = s.Id, Name = s.Name, Description = s.Description, Type = s.Type,
-        Cooldown = s.Cooldown, Duration = s.Duration,
-        CooldownRemaining = s.CooldownRemaining, DurationRemaining = s.DurationRemaining,
-        IsLocked = s.IsLocked, TriggerOnTurnEnd = s.TriggerOnTurnEnd,
-        Conditions = s.Conditions.Select(c => new SkillCondition { FieldId = c.FieldId, Op = c.Op, Value = c.Value, IsPercentage = c.IsPercentage }).ToList(),
-        Effects    = s.Effects.Select(e => new SkillEffect { FieldId = e.FieldId, Op = e.Op, Value = e.Value, IsPercentage = e.IsPercentage }).ToList(),
+        Conditions  = b.Conditions.Select(CloneCond).ToList(),
+        Effects     = b.Effects.Select(CloneFx).ToList(),
+        ElseEffects = b.ElseEffects.Select(CloneFx).ToList(),
     };
 
-    /// <summary>Re-pull the draft from the authoritative store (call when entering the Skills tab).</summary>
-    internal void SyncFromStore() => SyncDraft();
+    private static RpSkill Clone(RpSkill s)
+    {
+        var blocks    = s.ConditionalBlocks.Select(CloneBlock).ToList();
+        var baseConds = s.Conditions.Select(CloneCond).ToList();
+        var baseFx    = s.Effects.Select(CloneFx).ToList();
+
+        if (s.TriggerOnTurnEnd && (baseFx.Count > 0 || baseConds.Count > 0))
+        {
+            // Legacy whole-skill "Trigger on Turn End" flag is now an explicit "On Turn End" block:
+            // its base conditions+effects become a leading block carrying the turn-end marker. The flag
+            // is dropped below. Lossless + idempotent.
+            baseConds.Insert(0, new SkillCondition { FieldId = StatMath.OnTurnEndId });
+            blocks.Insert(0, new EffectBlock { Conditions = baseConds, Effects = baseFx });
+            baseConds = new();
+            baseFx    = new();
+        }
+        else if (baseConds.Count > 0)
+        {
+            // Legacy base conditions are equivalent to a leading conditional block (a passive's base
+            // conditions+effects fire exactly like a met block). The standalone base-conditions editor has
+            // been retired in favour of the unified block list, so fold them in here. Lossless + idempotent.
+            blocks.Insert(0, new EffectBlock { Conditions = baseConds, Effects = baseFx });
+            baseConds = new();
+            baseFx    = new();
+        }
+
+        return new RpSkill
+        {
+            Id = s.Id, Name = s.Name, Description = s.Description, Type = s.Type,
+            Cooldown = s.Cooldown, Duration = s.Duration,
+            CooldownRemaining = s.CooldownRemaining, DurationRemaining = s.DurationRemaining,
+            IsLocked = s.IsLocked, TriggerOnTurnEnd = false,
+            Conditions        = baseConds,
+            Effects           = baseFx,
+            ConditionalBlocks = blocks,
+        };
+    }
+
+    /// <summary>Re-pull the draft from the authoritative store when entering the Skills tab, but only if
+    /// there is nothing in flight - an unsaved edit or an open editor is preserved across tab switches so
+    /// the user doesn't lose work by glancing at another tab.</summary>
+    internal void SyncFromStore() { if (!_dirty && !_editing) SyncDraft(); }
 
     public override void Draw()
     {
         string? code = plugin.ActiveCampaign;
-        if (code == null || plugin.ActiveCharacter == null)
+        if (code == null || plugin.LocalPlayerId == null || plugin.ActiveCharacter == null)
         {
             ImGui.TextDisabled("Connect and select a campaign to manage skills.");
             return;
         }
-        DrawBody(code);
+        DrawBody(code, plugin.LocalPlayerId);
     }
 
-    /// <summary>The skills editor body (left list + right editor), hosted standalone or in the RPCHARACTER Skills tab.</summary>
-    internal void DrawBody(string code)
+    /// <summary>The skills editor body (left list + right editor) for a target entity, hosted standalone or
+    /// in the RPCHARACTER Skills tab (PC = LocalPlayerId, or a companion/NPC id).</summary>
+    internal void DrawBody(string code, string entityId)
     {
-        var character = plugin.ActiveCharacter;
+        _code = code; _entityId = entityId;
+        var character = TargetCharacter();
         if (character == null) { ImGui.TextDisabled("No character in this campaign yet."); return; }
         float scale = ImGuiHelpers.GlobalScale;
         var   template = plugin.Store.TemplateOrDefault(code);
 
-        // If the authoritative skill count changed (e.g. another device) and we're clean, re-sync.
-        if (!_dirty && character.State.Skills.Count != _draft.Count) SyncDraft();
+        // Switching to a different entity always re-pulls (the draft belongs to the old entity; unsaved
+        // edits there are discarded by design). For the same entity, only re-pull when clean and the
+        // authoritative skill count changed elsewhere — preserving an in-progress edit across tab switches.
+        if (_syncedId != entityId || (!_dirty && character.State.Skills.Count != _draft.Count)) SyncDraft();
 
         // ── Left pane ──────────────────────────────────────────────────────────
         float leftW = 180 * scale;
@@ -103,11 +158,15 @@ public class SkillsWindow : Window, IDisposable
                                  : "";
                     bool selected = _selectedIdx == i;
                     if (selected) ImGui.PushStyleColor(ImGuiCol.Header, new Vector4(0.26f, 0.59f, 0.98f, 0.4f));
-                    if (ImGui.Selectable($"{badge} {sk.Name}{tag}##rpsk_{i}", selected)) _selectedIdx = i;
+                    if (ImGui.Selectable($"{badge} {sk.Name}{tag}##rpsk_{i}", selected))
+                    { if (_selectedIdx != i) _editing = false; _selectedIdx = i; }
                     if (selected) ImGui.PopStyleColor();
                     if (ImGui.BeginPopupContextItem($"##rpsk_ctx{i}"))
                     {
+                        if (_selectedIdx != i) _editing = false;
                         _selectedIdx = i;
+                        if (ImGui.MenuItem("Edit##rpsk_ctx_edit")) _editing = true;
+                        ImGui.Separator();
                         if (ImGui.MenuItem("Delete##rpsk_ctx_del")) deleteAt = i;
                         ImGui.EndPopup();
                     }
@@ -124,17 +183,9 @@ public class SkillsWindow : Window, IDisposable
                 {
                     _draft.Add(new RpSkill { Type = SkillType.Active });
                     _selectedIdx = _draft.Count - 1;
+                    _editing = true;   // new skills open straight into the editor
                     _dirty = true;
                 }
-
-                using (ImRaii.Disabled(!_dirty))
-                using (ImRaii.PushColor(ImGuiCol.Button, new Vector4(0.18f, 0.55f, 0.18f, 1f)))
-                    if (ImGui.Button("Save Changes##rpsk_save", new Vector2(-1, 0)))
-                    {
-                        _ = plugin.Network.CharacterSetSkills(code, _draft.Select(Clone).ToList());
-                        _dirty = false;
-                    }
-                if (_dirty) ImGui.TextColored(new Vector4(1f, 0.8f, 0.3f, 1f), "Unsaved changes");
             }
         }
 
@@ -149,14 +200,12 @@ public class SkillsWindow : Window, IDisposable
             return;
         }
 
-        DrawEditor(_draft[_selectedIdx], template, code, scale);
+        if (_editing) DrawEditor(_draft[_selectedIdx], template, code, scale);
+        else          DrawSkillView(_draft[_selectedIdx], template, code, scale);
     }
 
     private void DrawEditor(RpSkill skill, SheetTemplate template, string code, float scale)
     {
-        var allFields  = template.Groups.SelectMany(g => g.Fields).ToList();
-        var fieldNames = allFields.Select(f => f.Name).ToArray();
-
         ImGui.TextUnformatted("Name");
         ImGui.SetNextItemWidth(-1);
         string name = skill.Name;
@@ -175,13 +224,6 @@ public class SkillsWindow : Window, IDisposable
         ImGui.SameLine();
         if (ImGui.RadioButton("Passive##rpsk_tp", ref typeVal, 1)) { skill.Type = SkillType.Passive; _dirty = true; }
 
-        if (skill.Type == SkillType.Passive)
-        {
-            ImGui.Spacing();
-            bool tot = skill.TriggerOnTurnEnd;
-            if (ImGui.Checkbox("Trigger on Turn End##rpsk_tote", ref tot)) { skill.TriggerOnTurnEnd = tot; _dirty = true; }
-        }
-
         ImGui.Spacing();
         ImGui.TextUnformatted("Cooldown (turns)");
         ImGui.SetNextItemWidth(80 * scale);
@@ -198,15 +240,6 @@ public class SkillsWindow : Window, IDisposable
 
         ImGui.Spacing(); ImGui.Separator();
 
-        if (skill.Type == SkillType.Passive)
-        {
-            ImGui.TextUnformatted("Conditions  (fires when ALL are true)");
-            DrawParts(skill.Conditions, allFields, fieldNames, scale);
-            if (ImGui.SmallButton("+ Add Condition##rpsk_addcond"))
-            { skill.Conditions.Add(new SkillCondition { FieldId = allFields.FirstOrDefault()?.Id ?? "" }); _dirty = true; }
-            ImGui.Spacing(); ImGui.Separator();
-        }
-
         ImGui.TextUnformatted("Effects");
         var fxFields = EffectEditor.TargetFields(template);
         var fxNames  = fxFields.Select(f => f.Name).ToArray();
@@ -214,31 +247,103 @@ public class SkillsWindow : Window, IDisposable
         if (ImGui.SmallButton("+ Add Effect##rpsk_addefx"))
         { skill.Effects.Add(new SkillEffect { FieldId = fxFields.FirstOrDefault()?.Id ?? "" }); _dirty = true; }
 
-        // ── Use / activate (authoritative; disabled while unsaved or on cooldown) ──
+        // Independent conditional blocks: extra (if -> then) groups on top of the base effects above.
+        ImGui.Spacing(); ImGui.Separator();
+        ImGui.TextUnformatted("Conditional blocks");
+        ImGui.PushTextWrapPos(0f);
+        ImGui.TextDisabled("Each block's effects apply independently while its own conditions hold. " +
+                           "Use the \"On Turn End\" trigger to fire a block once per turn instead.");
+        ImGui.PopTextWrapPos();
+        var condFields = ConditionEditor.TargetFields(template, includeTurnEnd: true);
+        var condNames  = condFields.Select(f => f.Name).ToArray();
+        if (BlockListEditor.Draw(skill.ConditionalBlocks, condFields, condNames, fxFields, fxNames, scale, "rpsk_blocks"))
+            _dirty = true;
+
+        // ── Save this edit (publishes the whole skill list) and return to the read-only view ──
         ImGui.Spacing(); ImGui.Separator(); ImGui.Spacing();
-        var live = plugin.ActiveCharacter?.State.Skills.FirstOrDefault(s => s.Id == skill.Id);
+        using (ImRaii.PushColor(ImGuiCol.Button, new Vector4(0.18f, 0.55f, 0.18f, 1f)))
+            if (ImGui.Button("Save##rpsk_save", new Vector2(-1, 0)))
+            {
+                _ = plugin.Network.CharacterSetSkills(code, _entityId, _draft.Select(Clone).ToList());
+                _dirty   = false;
+                _editing = false;
+            }
+    }
+
+    /// <summary>Read-only presentation of a skill: details, effects, live block status, and the Use/Trigger
+    /// button. An "Edit" button flips into <see cref="DrawEditor"/>. This is the default pane.</summary>
+    private void DrawSkillView(RpSkill skill, SheetTemplate template, string code, float scale)
+    {
+        ImGui.TextDisabled(skill.Type == SkillType.Active ? "[Active]" : "[Passive]");
+        ImGui.SameLine();
+        ImGui.TextUnformatted(skill.Name);
+        ImGui.Separator();
+
+        if (!string.IsNullOrWhiteSpace(skill.Description))
+        {
+            ImGui.Spacing();
+            ImGui.PushTextWrapPos(0f);
+            ImGui.TextDisabled(skill.Description);
+            ImGui.PopTextWrapPos();
+            ImGui.Spacing();
+        }
+
+        if (skill.Cooldown > 0 || skill.Duration > 0)
+        {
+            if (skill.Cooldown > 0) ImGui.TextDisabled($"Cooldown: {skill.Cooldown}t");
+            if (skill.Duration > 0) { if (skill.Cooldown > 0) ImGui.SameLine(); ImGui.TextDisabled($"  Duration: {skill.Duration}t"); }
+        }
+
+        ImGui.Spacing(); ImGui.Separator();
+
+        string baseFx = ItemEffects.Summary(skill.Effects, template);
+        if (!string.IsNullOrEmpty(baseFx))
+        {
+            ImGui.TextUnformatted("Effects");
+            ImGui.PushTextWrapPos(0f);
+            ImGui.TextColored(new Vector4(0.45f, 0.85f, 0.45f, 1f), baseFx);
+            ImGui.PopTextWrapPos();
+        }
+
+        if (skill.ConditionalBlocks.Count > 0)
+        {
+            var st = TargetCharacter()?.State;
+            ImGui.Spacing();
+            ImGui.TextUnformatted("Conditional");
+            ImGui.PushTextWrapPos(0f);
+            foreach (var b in skill.ConditionalBlocks)
+            {
+                string fx = ItemEffects.Summary(b.Effects, template);
+                if (string.IsNullOrEmpty(fx)) continue;
+                string cond = ItemEffects.ConditionSummary(b.Conditions, template);
+                bool   met  = st != null && StatMath.ConditionsMet(b.Conditions, st, template);
+                var    col  = met ? new Vector4(0.45f, 0.85f, 0.45f, 1f) : new Vector4(0.65f, 0.65f, 0.65f, 1f);
+                ImGui.TextColored(col, string.IsNullOrEmpty(cond) ? $"Always: {fx}" : $"If {cond}: {fx}");
+                string elseFx = ItemEffects.Summary(b.ElseEffects, template);
+                if (!string.IsNullOrEmpty(elseFx))
+                    ImGui.TextColored(met ? new Vector4(0.65f, 0.65f, 0.65f, 1f) : new Vector4(0.45f, 0.85f, 0.45f, 1f), $"  Else: {elseFx}");
+            }
+            ImGui.PopTextWrapPos();
+        }
+
+        ImGui.Spacing(); ImGui.Separator(); ImGui.Spacing();
+        DrawUseRow(skill, code);
+
+        ImGui.Spacing();
+        ImGui.TextDisabled("Right-click a skill in the list to edit or delete.");
+    }
+
+    /// <summary>The Use/Trigger button + live cooldown/duration status, shared by the view and editor panes.</summary>
+    private void DrawUseRow(RpSkill skill, string code)
+    {
+        var live = TargetCharacter()?.State.Skills.FirstOrDefault(s => s.Id == skill.Id);
         bool blocked = _dirty || live == null || live.CooldownRemaining > 0 || live.DurationRemaining > 0;
         string useLabel = skill.Type == SkillType.Active ? "Use Skill##rpsk_use" : "Trigger##rpsk_use";
         using (ImRaii.Disabled(blocked))
-            if (ImGui.Button(useLabel)) _ = plugin.Network.UseSkill(code, skill.Id);
+            if (ImGui.Button(useLabel)) _ = plugin.Network.UseSkill(code, _entityId, skill.Id);
         if (_dirty) { ImGui.SameLine(); ImGui.TextDisabled("(save first)"); }
         else if (live is { DurationRemaining: > 0 }) { ImGui.SameLine(); ImGui.TextColored(new Vector4(0.2f, 0.85f, 0.3f, 1f), $"● {live.DurationRemaining}t remaining"); }
         else if (live is { CooldownRemaining: > 0 }) { ImGui.SameLine(); ImGui.TextDisabled($"({live.CooldownRemaining}t cooldown)"); }
-    }
-
-    private void DrawParts(List<SkillCondition> conds, List<SheetField> allFields, string[] fieldNames, float scale)
-    {
-        if (!ImGui.BeginTable("##rpsk_conds", 5, ImGuiTableFlags.SizingFixedFit | ImGuiTableFlags.BordersInnerV)) return;
-        SetupPartCols(scale);
-        for (int i = conds.Count - 1; i >= 0; i--)
-        {
-            ImGui.TableNextRow(); ImGui.PushID($"##cond{i}");
-            if (ConditionEditor.DrawRow(conds[i], allFields, fieldNames)) _dirty = true;
-            ImGui.TableSetColumnIndex(4);
-            if (ImGui.SmallButton($"X##cdel{i}")) { conds.RemoveAt(i); _dirty = true; }
-            ImGui.PopID();
-        }
-        ImGui.EndTable();
     }
 
     private void DrawEffects(List<SkillEffect> fxs, List<SheetField> fields, string[] fieldNames, float scale)

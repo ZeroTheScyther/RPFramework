@@ -51,25 +51,27 @@ public class PlayerSkillsWindow : Window, IDisposable
     }
 
     public override void Draw()
-    {
-        float scale = ImGuiHelpers.GlobalScale;
-        float leftW = 170 * scale;
-        var skills = Skills;
+        => DrawReadOnly(_plugin.Store.TemplateOrDefault(_code), Skills, ref _selectedIdx, ImGuiHelpers.GlobalScale);
 
+    /// <summary>Read-only skills browser (left list + detail) for any skill set. Reused by the Companion
+    /// tab; the caller owns the selection index.</summary>
+    public static void DrawReadOnly(SheetTemplate template, List<RpSkill> skills, ref int selectedIdx, float scale)
+    {
+        float leftW = 170 * scale;
         using (var left = ImRaii.Child("##rpviewsklist", new Vector2(leftW, -1), false))
         {
             if (left)
             {
-                if (_selectedIdx >= skills.Count) _selectedIdx = skills.Count - 1;
+                if (selectedIdx >= skills.Count) selectedIdx = skills.Count - 1;
 
                 for (int i = 0; i < skills.Count; i++)
                 {
                     var    sk    = skills[i];
                     string badge = sk.Type == SkillType.Active ? "[A]" : "[P]";
-                    bool   sel   = _selectedIdx == i;
+                    bool   sel   = selectedIdx == i;
 
                     if (sel) ImGui.PushStyleColor(ImGuiCol.Header, new Vector4(0.26f, 0.59f, 0.98f, 0.4f));
-                    if (ImGui.Selectable($"{badge} {sk.Name}##rpviewsk_{i}", sel)) _selectedIdx = i;
+                    if (ImGui.Selectable($"{badge} {sk.Name}##rpviewsk_{i}", sel)) selectedIdx = i;
                     if (sel) ImGui.PopStyleColor();
                 }
 
@@ -82,18 +84,17 @@ public class PlayerSkillsWindow : Window, IDisposable
         using var right = ImRaii.Child("##rpviewskeditor", new Vector2(-1, -1), false);
         if (!right) return;
 
-        if (_selectedIdx < 0 || _selectedIdx >= skills.Count)
+        if (selectedIdx < 0 || selectedIdx >= skills.Count)
         {
-            ImGui.TextDisabled("Select a skill to view.");
+            if (skills.Count > 0) ImGui.TextDisabled("Select a skill to view.");
             return;
         }
 
-        DrawSkillView(skills[_selectedIdx]);
+        DrawSkillView(template, skills[selectedIdx]);
     }
 
-    private void DrawSkillView(RpSkill skill)
+    private static void DrawSkillView(SheetTemplate template, RpSkill skill)
     {
-        var template = _plugin.Store.TemplateOrDefault(_code);
         string GetFieldName(string fid) => template.FindField(fid)?.Name ?? fid;
 
         ImGui.TextDisabled(skill.Type == SkillType.Active ? "[Active]" : "[Passive]");

@@ -44,7 +44,7 @@ public sealed class InventoryGridView
     private string     _iconQuery = "", _lastIconQuery = "";
     private readonly List<(string Name, uint IconId)> _iconResults = new();
     private readonly List<SkillEffect>    _effects    = new();
-    private readonly List<SkillCondition> _conditions = new();
+    private readonly List<EffectBlock>    _blocks     = new();
 
     // Amount prompt, shared by Split and stackable trades
     private bool        _pendingAmt, _amtOpen;
@@ -181,6 +181,8 @@ public sealed class InventoryGridView
                 ImGui.TextColored(new Vector4(0.45f, 0.85f, 0.45f, 1f), ItemEffects.Summary(item.Effects, plugin.Store.TemplateOrDefault(code)));
             if (item.Conditions is { Count: > 0 })
                 ImGui.TextColored(new Vector4(0.70f, 0.70f, 0.45f, 1f), $"While: {ItemEffects.ConditionSummary(item.Conditions, plugin.Store.TemplateOrDefault(code))}");
+            foreach (var line in ItemEffects.BlockLines(item.Blocks, plugin.Store.TemplateOrDefault(code)))
+                ImGui.TextColored(new Vector4(0.55f, 0.75f, 0.85f, 1f), line);
             if (!string.IsNullOrWhiteSpace(item.Description))
             {
                 ImGui.PushTextWrapPos(260 * ImGuiHelpers.GlobalScale);
@@ -276,9 +278,20 @@ public sealed class InventoryGridView
         _effects.Clear();
         if (item?.Effects != null)
             _effects.AddRange(item.Effects.Select(e => new SkillEffect { FieldId = e.FieldId, Op = e.Op, Value = e.Value, IsPercentage = e.IsPercentage }));
-        _conditions.Clear();
-        if (item?.Conditions != null)
-            _conditions.AddRange(item.Conditions.Select(c => new SkillCondition { FieldId = c.FieldId, Op = c.Op, Value = c.Value, IsPercentage = c.IsPercentage }));
+        _blocks.Clear();
+        if (item?.Blocks != null)
+            _blocks.AddRange(item.Blocks.Select(CloneBlock));
+        // Legacy item base conditions gated the base effects exactly like a met block; fold them into a
+        // leading block (the standalone base-conditions UI has been retired in favour of the block list).
+        if (item?.Conditions is { Count: > 0 })
+        {
+            _blocks.Insert(0, new EffectBlock
+            {
+                Conditions = item.Conditions.Select(c => new SkillCondition { FieldId = c.FieldId, Op = c.Op, Value = c.Value, IsPercentage = c.IsPercentage }).ToList(),
+                Effects    = new List<SkillEffect>(_effects),
+            });
+            _effects.Clear(); // base effects moved into the block
+        }
         _pendingItem = true;
     }
 
@@ -313,19 +326,15 @@ public sealed class InventoryGridView
         if (_type.IsEquippable() || _type == RpItemType.Consumable)
         {
             ImGui.Spacing();
-            // Conditional gear only contributes its effects while ALL conditions hold (like a passive);
-            // with no conditions the effects are always-on. Consumables are point-of-use, so no gate.
-            if (_type.IsEquippable())
-            {
-                ImGui.TextDisabled(_conditions.Count == 0
-                    ? "Conditions (none = effects always active while equipped):"
-                    : "Conditions (effects apply only while ALL are true):");
-                DrawItemConditions(scale);
-                ImGui.Spacing();
-            }
-
-            ImGui.TextDisabled(_type == RpItemType.Consumable ? "Effects (applied on Use):" : "Effects (while equipped):");
+            // Base effects are always-on (equipment) / point-of-use (consumables). Conditional effects
+            // live in the block list below, where each block carries its own conditions (+ optional else).
+            ImGui.TextDisabled(_type == RpItemType.Consumable ? "Effects (applied on Use):" : "Effects (always on while equipped):");
             DrawItemEffects(scale);
+
+            // Independent conditional blocks (equipment only): extra (if -> then) groups summed when met,
+            // on top of the always-on base effects above. Consumables are point-of-use, so no blocks.
+            if (_type.IsEquippable())
+                DrawItemBlocks(scale);
         }
 
         ImGui.Spacing();
@@ -361,10 +370,11 @@ public sealed class InventoryGridView
                 List<SkillEffect>? fx = (_type.IsEquippable() || _type == RpItemType.Consumable) && _effects.Count > 0
                     ? _effects.Select(e => new SkillEffect { FieldId = e.FieldId, Op = e.Op, Value = e.Value, IsPercentage = e.IsPercentage }).ToList()
                     : null;
-                List<SkillCondition>? conds = _type.IsEquippable() && _conditions.Count > 0
-                    ? _conditions.Select(c => new SkillCondition { FieldId = c.FieldId, Op = c.Op, Value = c.Value, IsPercentage = c.IsPercentage }).ToList()
+                List<EffectBlock>? blocks = _type.IsEquippable() && _blocks.Count > 0
+                    ? _blocks.Select(CloneBlock).ToList()
                     : null;
-                var dto = new RpItemDto(_editItemId ?? Guid.NewGuid(), _name.Trim(), _desc, _iconId, _amount, _type, _capacity, null, fx, conds);
+                // Base conditions are retired; conditional logic lives entirely in blocks (Conditions = null).
+                var dto = new RpItemDto(_editItemId ?? Guid.NewGuid(), _name.Trim(), _desc, _iconId, _amount, _type, _capacity, null, fx, null, blocks);
                 if (_editItemId == null) _ = plugin.Network.ItemAdd(_itemBag, _itemPath, dto);
                 else                     _ = plugin.Network.ItemUpdate(_itemBag, _itemPath, dto);
                 _itemOpen = false; ImGui.CloseCurrentPopup();
@@ -413,33 +423,27 @@ public sealed class InventoryGridView
         if (ImGui.SmallButton("+ Add effect")) _effects.Add(new SkillEffect { FieldId = fields.FirstOrDefault()?.Id ?? "" });
     }
 
-    private void DrawItemConditions(float scale)
+    private void DrawItemBlocks(float scale)
     {
-        var template = plugin.Store.TemplateOrDefault(_itemCode);
-        var fields   = ConditionEditor.TargetFields(template);
-        var names    = fields.Select(f => f.Name).ToArray();
-        if (fields.Count == 0) { ImGui.TextDisabled("Publish a sheet template with stats to add conditions."); return; }
+        var template   = plugin.Store.TemplateOrDefault(_itemCode);
+        var condFields = ConditionEditor.TargetFields(template);
+        var condNames  = condFields.Select(f => f.Name).ToArray();
+        var fxFields   = EffectEditor.TargetFields(template, includeBarCurrent: false); // equipment raises max only
+        var fxNames    = fxFields.Select(f => f.Name).ToArray();
+        if (fxFields.Count == 0) return;
 
-        if (_conditions.Count > 0 && ImGui.BeginTable("##itcond", 5, ImGuiTableFlags.SizingFixedFit | ImGuiTableFlags.BordersInnerV))
-        {
-            ImGui.TableSetupColumn("Field", ImGuiTableColumnFlags.WidthFixed, 96 * scale);
-            ImGui.TableSetupColumn("Op",    ImGuiTableColumnFlags.WidthFixed, 44 * scale);
-            ImGui.TableSetupColumn("Value", ImGuiTableColumnFlags.WidthFixed, 56 * scale);
-            ImGui.TableSetupColumn("%",     ImGuiTableColumnFlags.WidthFixed, 22 * scale);
-            ImGui.TableSetupColumn("",      ImGuiTableColumnFlags.WidthFixed, 22 * scale);
-            ImGui.TableHeadersRow();
-            for (int i = _conditions.Count - 1; i >= 0; i--)
-            {
-                ImGui.TableNextRow(); ImGui.PushID($"##itcd{i}");
-                ConditionEditor.DrawRow(_conditions[i], fields, names);
-                ImGui.TableSetColumnIndex(4);
-                if (ImGui.SmallButton($"X##cd{i}")) _conditions.RemoveAt(i);
-                ImGui.PopID();
-            }
-            ImGui.EndTable();
-        }
-        if (ImGui.SmallButton("+ Add condition")) _conditions.Add(new SkillCondition { FieldId = fields.FirstOrDefault()?.Id ?? "" });
+        ImGui.Spacing();
+        ImGui.TextDisabled("Conditional blocks (each applies independently while its conditions hold):");
+        BlockListEditor.Draw(_blocks, condFields, condNames, fxFields, fxNames, scale, "itblocks");
     }
+
+    /// <summary>Deep copy of a block so the modal's editable list never shares references with a stored DTO.</summary>
+    private static EffectBlock CloneBlock(EffectBlock b) => new()
+    {
+        Conditions  = b.Conditions.Select(c => new SkillCondition { FieldId = c.FieldId, Op = c.Op, Value = c.Value, IsPercentage = c.IsPercentage }).ToList(),
+        Effects     = b.Effects.Select(e => new SkillEffect { FieldId = e.FieldId, Op = e.Op, Value = e.Value, IsPercentage = e.IsPercentage }).ToList(),
+        ElseEffects = b.ElseEffects.Select(e => new SkillEffect { FieldId = e.FieldId, Op = e.Op, Value = e.Value, IsPercentage = e.IsPercentage }).ToList(),
+    };
 
     private void RefreshIcons()
     {

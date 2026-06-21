@@ -36,5 +36,9 @@ public class Configuration : IPluginConfiguration
     /// so it's client-local — a shared DM inventory can sit in a different spot for each player.</summary>
     public Dictionary<string, List<Guid>> InventoryOrder { get; set; } = new();
 
+    /// <summary>Per-campaign active companion (campaign code → companion entity id). Which companion is
+    /// "out" is a personal choice swapped in the RPNPC vault; only it populates the Companions tab.</summary>
+    public Dictionary<string, string> ActiveCompanions { get; set; } = new();
+
     public void Save() => Plugin.PluginInterface.SavePluginConfig(this);
 }

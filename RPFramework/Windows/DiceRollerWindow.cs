@@ -22,6 +22,7 @@ public class DiceRollerWindow : Window, IDisposable
     private int _statModifierIdx = 0;
     private int _specIdx         = 0;
     private int _advantageMode   = 0;   // 0=Normal, 1=Advantage, 2=Disadvantage
+    private int _rollAsIdx       = 0;   // who to roll as: yourself, a companion, or (DM) an NPC
 
     private static readonly int[] DieSizes = { 4, 6, 8, 10, 12, 20, 100 };
 
@@ -45,7 +46,25 @@ public class DiceRollerWindow : Window, IDisposable
     {
         float scale    = ImGuiHelpers.GlobalScale;
         var   template = plugin.ActiveTemplate;
-        var   state    = plugin.ActiveCharacter?.State;
+        string? code   = plugin.ActiveCampaign;
+
+        // ── Roll as: yourself, one of your companions, or (DM only) an NPC from the vault ──
+        var rollAs = BuildRollAsList(code);
+        if (_rollAsIdx >= rollAs.Count) _rollAsIdx = 0;
+        string rollAsId = rollAs.Count > 0 ? rollAs[_rollAsIdx].Id : (plugin.LocalPlayerId ?? "");
+        var    state    = code != null ? plugin.Store.Character(code, rollAsId)?.State : null;
+
+        if (rollAs.Count > 1)
+        {
+            ImGui.AlignTextToFramePadding();
+            ImGui.TextColored(CharacterSheetWindow.LabelMuted, "Roll as");
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(-1);   // dropdown fills the rest of the row, to the right of the label
+            ImGui.Combo("##rprollas", ref _rollAsIdx, rollAs.Select(r => r.Label).ToArray(), rollAs.Count);
+            ImGui.Spacing();
+            ImGui.Separator();            // clearly divide the "roll as" row from the dice buttons
+            ImGui.Spacing();
+        }
 
         var numberFields = template.Groups.SelectMany(g => g.Fields).Where(f => f.Type == FieldType.Number).ToList();
         var checkFields  = template.Groups.SelectMany(g => g.Fields).Where(f => f.Type == FieldType.Checkbox).ToList();
@@ -76,10 +95,9 @@ public class DiceRollerWindow : Window, IDisposable
             _selectedDie = Math.Clamp(_selectedDie, 2, 1000);
 
         ImGui.Spacing();
-        ImGui.Separator();
 
         // ── Stat modifier ─────────────────────────────────────────────────────
-        ImGui.TextUnformatted("Stat Modifier");
+        CharacterSheetWindow.DrawSectionHeader("Stat Modifier", scale);
         ImGui.SetNextItemWidth(120 * scale);
         ImGui.Combo("##rpstatmod", ref _statModifierIdx, statOptions, statOptions.Length);
         if (_statModifierIdx > 0 && state != null)
@@ -92,7 +110,7 @@ public class DiceRollerWindow : Window, IDisposable
 
         // ── Specialization ────────────────────────────────────────────────────
         ImGui.Spacing();
-        ImGui.TextUnformatted("Specialization");
+        CharacterSheetWindow.DrawSectionHeader("Specialization", scale);
         ImGui.SetNextItemWidth(160 * scale);
         ImGui.Combo("##rpspecmod", ref _specIdx, specOptions, specOptions.Length);
         if (_specIdx > 0 && state != null)
@@ -116,7 +134,7 @@ public class DiceRollerWindow : Window, IDisposable
         {
             string? stat = _statModifierIdx > 0 ? numberFields[_statModifierIdx - 1].Id : null;
             string? spec = _specIdx > 0 ? checkFields[_specIdx - 1].Id : null;
-            Send(_selectedDie, Mode(), stat, spec);
+            Send(rollAsId, _selectedDie, Mode(), stat, spec);
         }
         if (!canRoll) ImGui.EndDisabled();
         if (!plugin.Network.IsConnected)
@@ -130,19 +148,35 @@ public class DiceRollerWindow : Window, IDisposable
         _ => RollMode.Normal,
     };
 
-    private void Send(int die, RollMode mode, string? statFieldId, string? specFieldId)
+    /// <summary>The roll-as choices for the active campaign: yourself first, then your companions, then
+    /// (DM only) the campaign's NPCs. Each entry pairs the entity id with a display label.</summary>
+    private List<(string Id, string Label)> BuildRollAsList(string? code)
+    {
+        var list = new List<(string, string)>();
+        string pid = plugin.LocalPlayerId ?? "";
+        list.Add((pid, "Yourself"));
+        if (code == null) return list;
+        foreach (var c in plugin.Store.CompanionsOf(code, pid).OrderBy(c => c.DisplayName))
+            list.Add((c.EntityId, c.DisplayName));
+        if (plugin.IsDm(code))
+            foreach (var n in plugin.Store.NpcsIn(code).OrderBy(n => n.DisplayName))
+                list.Add((n.EntityId, $"{n.DisplayName} (NPC)"));
+        return list;
+    }
+
+    private void Send(string entityId, int die, RollMode mode, string? statFieldId, string? specFieldId)
     {
         string? code = plugin.ActiveCampaign;
         if (code == null) return;
-        _ = plugin.Network.RollDice(code, die, mode, statFieldId, specFieldId);
+        _ = plugin.Network.RollDice(code, entityId, die, mode, statFieldId, specFieldId);
     }
 
-    /// <summary>Quick roll from chat (/rpdice dN) — no stat/spec modifiers, normal mode.</summary>
+    /// <summary>Quick roll from chat (/rpdice dN) — no stat/spec modifiers, normal mode, as yourself.</summary>
     public void RollFromCommand(string args)
     {
         args = args.Trim().ToLowerInvariant().TrimStart('d');
         if (int.TryParse(args, out int n) && n >= 2)
             _selectedDie = Math.Clamp(n, 2, 1000);
-        Send(_selectedDie, RollMode.Normal, null, null);
+        Send(plugin.LocalPlayerId ?? "", _selectedDie, RollMode.Normal, null, null);
     }
 }

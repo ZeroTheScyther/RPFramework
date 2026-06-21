@@ -20,6 +20,20 @@ public static class StatMath
     public static (string BaseId, bool TargetMax) SplitBarTarget(string fieldId)
         => fieldId.EndsWith(MaxSuffix) ? (fieldId[..^MaxSuffix.Length], true) : (fieldId, false);
 
+    /// Synthetic condition field id marking a block as an "On Turn End" trigger rather than a continuous
+    /// state predicate. A block carrying this condition never contributes to live passive adjustment; it
+    /// fires once per turn-end via <see cref="ApplyTurnEndEffects"/>. The marker is ignored when a block's
+    /// other conditions are evaluated, so "On Turn End" can be combined with real conditions.
+    public const string OnTurnEndId = "builtin:onturnend";
+
+    /// True when a block is gated by the <see cref="OnTurnEndId"/> turn-end marker.
+    static bool IsTurnEndBlock(EffectBlock b)
+    {
+        foreach (var c in b.Conditions)
+            if (c.FieldId == OnTurnEndId) return true;
+        return false;
+    }
+
     // ── AP exhaustion penalty ─────────────────────────────────────────────────
 
     /// AP exhaustion penalty applied to ALL stat rolls.
@@ -57,6 +71,49 @@ public static class StatMath
         return StatMod(EffectiveStat(ch, fid, template));
     }
 
+    // ── Active-effect gatherers (single source of truth for "what applies now") ──
+
+    /// <summary>
+    /// Every effect a skill currently contributes to live passive adjustment, across its base block and
+    /// each conditional block. The base block keeps the legacy gate (active skills contribute only during
+    /// an active duration; a conditional passive contributes while its conditions are met). Conditional
+    /// blocks contribute while the skill is engaged (active duration OR any passive) and their own
+    /// conditions hold (empty conditions = always while engaged). With no conditional blocks this is
+    /// identical to the pre-blocks behavior.
+    /// </summary>
+    public static IEnumerable<SkillEffect> ActiveSkillEffects(RpSkill skill, CharacterState ch, SheetTemplate template)
+    {
+        bool dur     = skill.DurationRemaining > 0;
+        bool passive = skill.Type == SkillType.Passive;
+
+        if (dur || (passive && skill.Conditions.Count > 0 && ConditionsMet(skill.Conditions, ch, template)))
+            foreach (var fx in skill.Effects) yield return fx;
+
+        if (dur || passive)
+            foreach (var b in skill.ConditionalBlocks)
+            {
+                if (IsTurnEndBlock(b)) continue;   // turn-end blocks fire only on turn end, never continuously
+                foreach (var fx in (ConditionsMet(b.Conditions, ch, template) ? b.Effects : b.ElseEffects))
+                    yield return fx;
+            }
+    }
+
+    /// <summary>
+    /// Every effect an equipped item currently contributes: its base effects (while <see cref="ItemActive"/>)
+    /// plus each conditional block whose conditions are met. With no blocks this is identical to the
+    /// pre-blocks behavior. The single place equipment effect-gathering lives.
+    /// </summary>
+    public static IEnumerable<SkillEffect> ActiveItemEffects(RpItemDto item, CharacterState ch, SheetTemplate template)
+    {
+        if (item.Effects != null && ItemActive(item, ch, template))
+            foreach (var fx in item.Effects) yield return fx;
+
+        if (item.Blocks != null)
+            foreach (var b in item.Blocks)
+                foreach (var fx in (ConditionsMet(b.Conditions, ch, template) ? b.Effects : b.ElseEffects))
+                    yield return fx;
+    }
+
     // ── Passive stat adjust ───────────────────────────────────────────────────
 
     /// Sum of raw stat deltas from active passives + equipped gear for the given field ID.
@@ -66,19 +123,10 @@ public static class StatMath
         int total = 0;
 
         foreach (var skill in ch.Skills)
-        {
-            bool condActive = skill.Type == SkillType.Passive
-                              && skill.Conditions.Count > 0
-                              && ConditionsMet(skill, ch, template);
-            bool durActive  = skill.DurationRemaining > 0;
-            if (!condActive && !durActive) continue;
-            total += FieldDelta(skill.Effects, fieldId, cur);
-        }
+            total += FieldDelta(ActiveSkillEffects(skill, ch, template), fieldId, cur);
 
-        // Equipped gear contributes passive adjustments while its conditions (if any) hold.
         foreach (var item in ch.Equipment.Values)
-            if (item.Effects != null && ItemActive(item, ch, template))
-                total += FieldDelta(item.Effects, fieldId, cur);
+            total += FieldDelta(ActiveItemEffects(item, ch, template), fieldId, cur);
 
         return total;
     }
@@ -94,21 +142,15 @@ public static class StatMath
 
         foreach (var skill in ch.Skills)
         {
-            bool condActive = skill.Type == SkillType.Passive
-                              && skill.Conditions.Count > 0
-                              && ConditionsMet(skill, ch, template);
-            bool durActive  = skill.DurationRemaining > 0;
-            if (!condActive && !durActive) continue;
-            int d = FieldDelta(skill.Effects, fieldId, cur);
+            int d = FieldDelta(ActiveSkillEffects(skill, ch, template), fieldId, cur);
             if (d != 0) list.Add((skill.Name, d));
         }
 
         foreach (var item in ch.Equipment.Values)
-            if (item.Effects != null && ItemActive(item, ch, template))
-            {
-                int d = FieldDelta(item.Effects, fieldId, cur);
-                if (d != 0) list.Add((item.Name, d));
-            }
+        {
+            int d = FieldDelta(ActiveItemEffects(item, ch, template), fieldId, cur);
+            if (d != 0) list.Add((item.Name, d));
+        }
 
         return list;
     }
@@ -121,22 +163,14 @@ public static class StatMath
         var list = new List<(string, bool)>();
 
         foreach (var skill in ch.Skills)
-        {
-            bool condActive = skill.Type == SkillType.Passive
-                              && skill.Conditions.Count > 0
-                              && ConditionsMet(skill, ch, template);
-            bool durActive  = skill.DurationRemaining > 0;
-            if (!condActive && !durActive) continue;
-            foreach (var fx in skill.Effects)
+            foreach (var fx in ActiveSkillEffects(skill, ch, template))
                 if (fx.FieldId == fieldId && fx.Op == EffectOp.Set)
                     list.Add((skill.Name, fx.Value >= 1f));
-        }
 
         foreach (var item in ch.Equipment.Values)
-            if (item.Effects != null && ItemActive(item, ch, template))
-                foreach (var fx in item.Effects)
-                    if (fx.FieldId == fieldId && fx.Op == EffectOp.Set)
-                        list.Add((item.Name, fx.Value >= 1f));
+            foreach (var fx in ActiveItemEffects(item, ch, template))
+                if (fx.FieldId == fieldId && fx.Op == EffectOp.Set)
+                    list.Add((item.Name, fx.Value >= 1f));
 
         return list;
     }
@@ -185,8 +219,7 @@ public static class StatMath
             bonus = StatMod(src);
         int gear = 0;
         foreach (var item in ch.Equipment.Values)
-            if (item.Effects != null && ItemActive(item, ch, template))
-                gear += FieldDelta(item.Effects, bar.Id + MaxSuffix, storedMax);
+            gear += FieldDelta(ActiveItemEffects(item, ch, template), bar.Id + MaxSuffix, storedMax);
         return storedMax + bonus + gear;
     }
 
@@ -209,11 +242,10 @@ public static class StatMath
         }
 
         foreach (var item in ch.Equipment.Values)
-            if (item.Effects != null && ItemActive(item, ch, template))
-            {
-                int d = FieldDelta(item.Effects, bar.Id + MaxSuffix, storedMax);
-                if (d != 0) list.Add((item.Name, d));
-            }
+        {
+            int d = FieldDelta(ActiveItemEffects(item, ch, template), bar.Id + MaxSuffix, storedMax);
+            if (d != 0) list.Add((item.Name, d));
+        }
 
         return list;
     }
@@ -223,11 +255,15 @@ public static class StatMath
     public static bool ConditionsMet(RpSkill skill, CharacterState ch, SheetTemplate template)
         => ConditionsMet(skill.Conditions, ch, template);
 
-    /// True when every condition in the set holds (an empty set is vacuously true).
+    /// True when every condition in the set holds (an empty set is vacuously true). The
+    /// <see cref="OnTurnEndId"/> turn-end marker is not a state predicate, so it is skipped here.
     public static bool ConditionsMet(IEnumerable<SkillCondition> conditions, CharacterState ch, SheetTemplate template)
     {
         foreach (var c in conditions)
+        {
+            if (c.FieldId == OnTurnEndId) continue;   // event marker, not a state predicate
             if (!EvalCondition(c, ch, template)) return false;
+        }
         return true;
     }
 
@@ -260,10 +296,59 @@ public static class StatMath
     public static void ApplyEffects(RpSkill skill, CharacterState ch, SheetTemplate template)
     {
         bool timed = skill.Duration > 0;
-        var  hpBar = template.FindHpBar();
-        var  apBar = template.FindApBar();
 
-        foreach (var fx in skill.Effects)
+        // Activation applies the base block plus every conditional block whose conditions hold right now.
+        // Turn-end blocks are excluded here — they fire from ApplyTurnEndEffects, not on activation.
+        var toApply = new List<SkillEffect>(skill.Effects);
+        foreach (var b in skill.ConditionalBlocks)
+        {
+            if (IsTurnEndBlock(b)) continue;
+            toApply.AddRange(ConditionsMet(b.Conditions, ch, template) ? b.Effects : b.ElseEffects);
+        }
+
+        ApplyEffectList(toApply, timed, ch, template);
+
+        if (skill.Duration > 0) skill.DurationRemaining = skill.Duration;
+        if (skill.Cooldown > 0) skill.CooldownRemaining = skill.Cooldown;
+    }
+
+    /// <summary>
+    /// Fires a skill's turn-end effects once (called from the server's end-of-turn tick). Honors both
+    /// the legacy whole-skill <see cref="RpSkill.TriggerOnTurnEnd"/> flag (applies the base effects while
+    /// the base conditions hold) and any conditional block carrying the <see cref="OnTurnEndId"/> marker
+    /// (applies that block's met/else branch). Turn-end effects are never timed — they tick current
+    /// values permanently. Sets the cooldown if anything applied and the skill has one. Returns whether
+    /// any effect was applied.
+    /// </summary>
+    public static bool ApplyTurnEndEffects(RpSkill skill, CharacterState ch, SheetTemplate template)
+    {
+        var toApply = new List<SkillEffect>();
+
+        if (skill.TriggerOnTurnEnd && ConditionsMet(skill.Conditions, ch, template))
+            toApply.AddRange(skill.Effects);
+
+        foreach (var b in skill.ConditionalBlocks)
+        {
+            if (!IsTurnEndBlock(b)) continue;
+            toApply.AddRange(ConditionsMet(b.Conditions, ch, template) ? b.Effects : b.ElseEffects);
+        }
+
+        if (toApply.Count == 0) return false;
+
+        ApplyEffectList(toApply, timed: false, ch, template);
+        if (skill.Cooldown > 0) skill.CooldownRemaining = skill.Cooldown;
+        return true;
+    }
+
+    /// Applies a flat list of effects to the character's stat dicts. When <paramref name="timed"/> is
+    /// true (a duration skill activating), only current HP/AP are touched — every other change, including
+    /// any bar-max change, is deferred to live passive adjustment. When false, all effects apply directly.
+    static void ApplyEffectList(IEnumerable<SkillEffect> effects, bool timed, CharacterState ch, SheetTemplate template)
+    {
+        var hpBar = template.FindHpBar();
+        var apBar = template.FindApBar();
+
+        foreach (var fx in effects)
         {
             var (baseId, targetMax) = SplitBarTarget(fx.FieldId);
             var    field  = template.FindField(baseId);
@@ -316,9 +401,6 @@ public static class StatMath
                     break;
             }
         }
-
-        if (skill.Duration > 0) skill.DurationRemaining = skill.Duration;
-        if (skill.Cooldown > 0) skill.CooldownRemaining = skill.Cooldown;
     }
 
     // ── Internal helpers ──────────────────────────────────────────────────────

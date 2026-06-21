@@ -59,18 +59,38 @@ public class PlayerSheetWindow : Window, IDisposable
         using var scroll = ImRaii.Child("##psheetscroll", new Vector2(-1, -1), false, ImGuiWindowFlags.HorizontalScrollbar);
         if (!scroll) return;
 
+        DrawGroups(st, template, scale);
+    }
+
+    /// <summary>Renders a read-only sheet: each group (optionally filtered) that has any visible content.
+    /// A group with only empty text fields is skipped entirely, and empty text fields are hidden, so a
+    /// sparsely-filled profile shows only what's actually set. Reused by the Companion tab.</summary>
+    public static void DrawGroups(CharacterState st, SheetTemplate template, float scale, Func<SheetGroup, bool>? filter = null)
+    {
         foreach (var group in template.Groups)
         {
+            if (filter != null && !filter(group)) continue;
+            if (!HasContent(group, st)) continue;
             DrawGroup(group, st, template, scale);
             ImGuiHelpers.ScaledDummy(4f);
         }
     }
 
-    private void DrawGroup(SheetGroup group, CharacterState p, SheetTemplate template, float scale)
+    /// <summary>Whether a group has anything worth showing read-only: any non-text field, or any text
+    /// field with a non-empty value.</summary>
+    private static bool HasContent(SheetGroup g, CharacterState st)
     {
-        ImGui.TextUnformatted(group.Name);
-        ImGui.Separator();
-        ImGuiHelpers.ScaledDummy(2f);
+        foreach (var f in g.Fields)
+        {
+            if (f.Type != FieldType.Text) return true;
+            if (st.TextValues.TryGetValue(f.Id, out var v) && !string.IsNullOrWhiteSpace(v)) return true;
+        }
+        return false;
+    }
+
+    public static void DrawGroup(SheetGroup group, CharacterState p, SheetTemplate template, float scale)
+    {
+        CharacterSheetWindow.DrawSectionHeader(group.Name, scale);
 
         var bars    = group.Fields.Where(f => f.Type == FieldType.Bar).ToList();
         var dots    = group.Fields.Where(f => f.Type == FieldType.Dot).ToList();
@@ -138,17 +158,29 @@ public class PlayerSheetWindow : Window, IDisposable
             }
         }
 
-        if (texts.Count > 0)
+        // Hide empty text fields entirely (only show what's actually filled in).
+        var filledTexts = texts.Where(f => p.TextValues.TryGetValue(f.Id, out var v) && !string.IsNullOrWhiteSpace(v)).ToList();
+        if (filledTexts.Count > 0)
         {
             if (bars.Count > 0 || dots.Count > 0 || numbers.Count > 0 || checks.Count > 0) ImGui.Spacing();
-            foreach (var f in texts)
+            using var _ind = ImRaii.PushIndent(8f * scale, false);
+            foreach (var f in filledTexts)
             {
                 p.TextValues.TryGetValue(f.Id, out string? val);
-                ImGui.TextUnformatted(f.Name); MaybeTooltip(f);
-                if (string.IsNullOrWhiteSpace(val)) { ImGui.TextDisabled("(empty)"); continue; }
-                ImGui.PushTextWrapPos(ImGui.GetContentRegionAvail().X);
-                ImGui.TextUnformatted(val);
-                ImGui.PopTextWrapPos();
+                // Styled like the Profile tab: muted label; single-line values align inline, notes stack.
+                ImGui.TextColored(CharacterSheetWindow.LabelMuted, f.Name); MaybeTooltip(f);
+                if (!f.Multiline)
+                {
+                    ImGui.SameLine(118f * scale);
+                    ImGui.TextUnformatted(val);
+                }
+                else
+                {
+                    ImGui.PushTextWrapPos(ImGui.GetContentRegionAvail().X);
+                    ImGui.TextUnformatted(val);
+                    ImGui.PopTextWrapPos();
+                }
+                ImGuiHelpers.ScaledDummy(3f);
             }
         }
     }

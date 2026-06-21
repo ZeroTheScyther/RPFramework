@@ -33,6 +33,11 @@ public static class HubRoutes
         public const string UseSkill           = nameof(UseSkill);
         public const string TemplatePublish    = nameof(TemplatePublish);
 
+        // Entities (companions / NPCs) — full characters beyond the player's own PC
+        public const string EntityCreate = nameof(EntityCreate);
+        public const string EntityDelete = nameof(EntityDelete);
+        public const string EntityRename = nameof(EntityRename);
+
         // Dice
         public const string RollDice = nameof(RollDice);
 
@@ -80,6 +85,7 @@ public static class HubRoutes
         public const string PartyUpdated        = nameof(PartyUpdated);        // PartyDto
         public const string PartyDisbanded      = nameof(PartyDisbanded);      // string code
         public const string CharacterUpdated    = nameof(CharacterUpdated);    // CharacterDto
+        public const string CharacterRemoved    = nameof(CharacterRemoved);    // string code, string entityId
         public const string TemplateUpdated     = nameof(TemplateUpdated);     // TemplateDto
         public const string DiceRoll            = nameof(DiceRoll);            // DiceRollResultDto
         public const string InitiativeUpdated   = nameof(InitiativeUpdated);   // InitiativeStateDto

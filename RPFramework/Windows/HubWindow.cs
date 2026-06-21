@@ -56,6 +56,13 @@ public class HubWindow : Window, IDisposable
         DrawIdentityHeader();
         ImGui.Separator();
 
+        // Disconnected: hide the campaign UI entirely and offer a single centered Connect action.
+        if (!plugin.Network.IsConnected)
+        {
+            DrawConnectPrompt();
+            return;
+        }
+
         ImGui.SetNextItemWidth(-1);
         ImGui.InputTextWithHint("##hubsearch", "Search campaigns…", ref _searchQuery, 128);
         ImGuiHelpers.ScaledDummy(2f);
@@ -68,6 +75,30 @@ public class HubWindow : Window, IDisposable
         DrawCreatePartyPopup();
         DrawJoinPartyPopup();
         DrawLeaveConfirmPopup();
+    }
+
+    /// <summary>The disconnected state: a single Connect button centered in the body, with the identity
+    /// header above still showing connection status. No campaign UI is drawn while offline.</summary>
+    private void DrawConnectPrompt()
+    {
+        float cw    = ContentWidth();
+        float avail = ImGui.GetContentRegionAvail().Y;
+        float btnW  = 150 * ImGuiHelpers.GlobalScale;
+        float btnH  = ImGui.GetFrameHeight() * 1.4f;
+        float lineH = ImGui.GetTextLineHeightWithSpacing();
+
+        // Vertically center the hint + button block in the remaining space.
+        float blockH = lineH + ImGuiHelpers.GlobalScale * 8f + btnH;
+        if (avail > blockH) ImGui.Dummy(new Vector2(0, (avail - blockH) * 0.5f));
+
+        const string hint = "Not connected to the relay.";
+        float hintW = ImGui.CalcTextSize(hint).X;
+        ImGui.SetCursorPosX(ImGui.GetWindowContentRegionMin().X + (cw - hintW) * 0.5f);
+        ImGui.TextDisabled(hint);
+        ImGuiHelpers.ScaledDummy(8f);
+
+        ImGui.SetCursorPosX(ImGui.GetWindowContentRegionMin().X + (cw - btnW) * 0.5f);
+        if (ImGui.Button("Connect##hubconn_center", new Vector2(btnW, btnH))) plugin.Connect();
     }
 
     private void DrawIdentityHeader()
@@ -93,13 +124,14 @@ public class HubWindow : Window, IDisposable
         ImGui.AlignTextToFramePadding();
         ImGui.TextDisabled(connected ? "Connected to relay" : "Not connected  (/rpsettings to configure)");
 
-        float btnW = 90 * ImGuiHelpers.GlobalScale;
-        ImGui.SameLine(ImGui.GetWindowContentRegionMin().X + cw - btnW);
+        // While connected the header carries the Disconnect button; while disconnected the only action is
+        // the big centered Connect button (see DrawConnectPrompt), so the header stays status-only.
         if (connected)
         {
+            float btnW = 90 * ImGuiHelpers.GlobalScale;
+            ImGui.SameLine(ImGui.GetWindowContentRegionMin().X + cw - btnW);
             if (ImGui.Button("Disconnect##hubdisc", new Vector2(btnW, 0))) Task.Run(() => plugin.Network.DisconnectAsync());
         }
-        else if (ImGui.Button("Connect##hubconn", new Vector2(btnW, 0))) plugin.Connect();
     }
 
     private void DrawPartiesSection()

@@ -27,17 +27,27 @@ public class RpCharacterWindow : Window, IDisposable
     private bool _forceTab;
     private Tab  _current = Tab.Profile;
     private bool _profileEdit;   // owner toggles their Profile tab between read-only and editable
+    private int  _compSkillSel = -1;   // selected skill index in the read-only Companion skills view
+
+    // Fixed final size (non-resizable by request); on open it animates out to this from a smaller scale.
+    private static readonly Vector2 FullSize = new(540, 740);
+    private const  float  AnimDuration = 0.17f;          // seconds
+    private const  float  AnimFromScale = 0.82f;         // starts at 82% then eases out to 100%
+    private        double _animElapsed = AnimDuration;   // start "done" so a window already open isn't animated
 
     public RpCharacterWindow(Plugin plugin)
         : base("RP Character##RPFramework.Character",
                ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse | ImGuiWindowFlags.NoResize)
     {
         _plugin       = plugin;
-        Size          = new Vector2(470, 740);   // fixed; window is non-resizable by request
+        Size          = FullSize;
         SizeCondition = ImGuiCond.Always;
     }
 
     public void Dispose() { }
+
+    /// <summary>Replays the expand-out animation each time the window opens.</summary>
+    public override void OnOpen() => _animElapsed = 0;
 
     /// <summary>Set the title to the character's name and rebuild the title-bar buttons before the window draws.</summary>
     public override void PreDraw()
@@ -72,6 +82,14 @@ public class RpCharacterWindow : Window, IDisposable
                 Click       = _ => _plugin.CharacterSheetWindow.EnterTemplateEditor(c),
             });
         }
+
+        // Expand-out animation: ease the window from AnimFromScale up to full size over AnimDuration.
+        if (_animElapsed < AnimDuration)
+            _animElapsed += ImGui.GetIO().DeltaTime;
+        float t     = Math.Clamp((float)(_animElapsed / AnimDuration), 0f, 1f);
+        float eased = 1f - MathF.Pow(1f - t, 3f);                       // easeOutCubic
+        Size        = FullSize * (AnimFromScale + (1f - AnimFromScale) * eased);
+        SizeCondition = ImGuiCond.Always;
     }
 
     /// <summary>Opens the window straight to a given tab (used by the /rp* command shortcuts).</summary>
@@ -108,7 +126,9 @@ public class RpCharacterWindow : Window, IDisposable
         DrawTab(Tab.Stats,     "Stats",     code);
         DrawTab(Tab.Skills,    "Skills",    code);
         DrawTab(Tab.Equipment, "Equipment", code);
-        DrawTab(Tab.Companion, "Companion", code);
+        // The Companions tab only exists while a companion is active (swapped in via the RPNPC vault).
+        if (_plugin.ActiveCompanion(code) != null)
+            DrawTab(Tab.Companion, "Companion", code);
     }
 
     private void DrawTab(Tab tab, string label, string code)
@@ -134,11 +154,11 @@ public class RpCharacterWindow : Window, IDisposable
     {
         switch (tab)
         {
-            case Tab.Profile:   _plugin.CharacterSheetWindow.DrawProfile(code, _profileEdit); break;
-            case Tab.Stats:     _plugin.CharacterSheetWindow.DrawStats(code);   break;
+            case Tab.Profile:   _plugin.CharacterSheetWindow.DrawProfile(code, _plugin.LocalPlayerId!, _profileEdit); break;
+            case Tab.Stats:     _plugin.CharacterSheetWindow.DrawStats(code, _plugin.LocalPlayerId!);   break;
             case Tab.Skills:
                 if (_plugin.ActiveCharacter == null) ImGui.TextDisabled("No character in this campaign yet.");
-                else _plugin.SkillsWindow.DrawBody(code);
+                else _plugin.SkillsWindow.DrawBody(code, _plugin.LocalPlayerId!);
                 break;
             case Tab.Equipment: DrawEquipment(code); break;
             case Tab.Companion: DrawCompanion(code); break;
@@ -201,6 +221,16 @@ public class RpCharacterWindow : Window, IDisposable
                 ImGui.TextColored(active ? new Vector4(0.45f, 0.85f, 0.45f, 1f) : new Vector4(0.85f, 0.45f, 0.45f, 1f),
                                   active ? "(active)" : "(inactive)");
             }
+            if (item.Blocks is { Count: > 0 })
+                foreach (var b in item.Blocks)
+                {
+                    string fx = ItemEffects.Summary(b.Effects, template);
+                    if (string.IsNullOrEmpty(fx)) continue;
+                    string cond = ItemEffects.ConditionSummary(b.Conditions, template);
+                    bool   met  = StatMath.ConditionsMet(b.Conditions, st, template);
+                    ImGui.TextColored(met ? new Vector4(0.45f, 0.85f, 0.45f, 1f) : new Vector4(0.65f, 0.65f, 0.65f, 1f),
+                                      string.IsNullOrEmpty(cond) ? $"Always: {fx}" : $"If {cond}: {fx}");
+                }
             if (!string.IsNullOrWhiteSpace(item.Description))
             {
                 ImGui.PushTextWrapPos(260 * ImGuiHelpers.GlobalScale);
@@ -235,10 +265,40 @@ public class RpCharacterWindow : Window, IDisposable
 
     private void DrawCompanion(string code)
     {
-        ImGui.TextDisabled("Companion");
+        var comp = _plugin.ActiveCompanion(code);
+        if (comp == null) { ImGui.TextDisabled("No active companion. Open the RPNPC vault to set one."); return; }
+
+        var   template = _plugin.Store.TemplateOrDefault(code);
+        float scale    = ImGuiHelpers.GlobalScale;
+
+        ImGui.TextDisabled("Active Companion:");
+        ImGui.SameLine();
+        ImGui.TextUnformatted(comp.DisplayName);
+        ImGui.SameLine();
+        if (ImGui.SmallButton("Edit in RPNPC##comp_manage")) _plugin.RpNpcWindow.IsOpen = true;
         ImGui.Separator();
-        ImGuiHelpers.ScaledDummy(8f);
-        ImGui.TextWrapped("Not built yet. Companions will get their own Name, Kind, stats, and pools - " +
-                          "a lightweight character of their own.");
+
+        // View-only here; all companion editing happens in the RPNPC vault.
+        // NOTE: bar id is versioned — ImGui persists tab order per bar id, and renaming a tab appends it
+        // after already-known tabs. Bump the suffix if the tab set changes to reset the persisted order.
+        using var tabs = ImRaii.TabBar("##comptabs_v2");
+        if (!tabs) return;
+        if (ImGui.BeginTabItem("Profile##comp_profile"))
+        {
+            // Combined view: profile fields up top, then the stats/pools/specs below.
+            using (var c = ImRaii.Child("##comp_profilebody", new Vector2(-1, -1), false))
+                if (c)
+                {
+                    PlayerSheetWindow.DrawGroups(comp.State, template, scale, CharacterSheetWindow.IsProfileGroup);
+                    PlayerSheetWindow.DrawGroups(comp.State, template, scale, g => !CharacterSheetWindow.IsProfileGroup(g));
+                }
+            ImGui.EndTabItem();
+        }
+        if (ImGui.BeginTabItem("Skills##comp_skills"))
+        {
+            using (var c = ImRaii.Child("##comp_skillsbody", new Vector2(-1, -1), false))
+                if (c) PlayerSkillsWindow.DrawReadOnly(template, comp.State.Skills, ref _compSkillSel, scale);
+            ImGui.EndTabItem();
+        }
     }
 }

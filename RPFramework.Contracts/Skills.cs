@@ -23,6 +23,18 @@ public sealed class SkillEffect
     public bool     IsPercentage { get; set; } = false;
 }
 
+/// <summary>
+/// One independent conditional group of effects. Empty <see cref="Conditions"/> = always active.
+/// Lets a single skill/item carry multiple if-blocks (e.g. "+10 STR always; if HP&lt;50% then +20 STR")
+/// that are evaluated and summed independently, instead of one condition set gating ALL effects.
+/// </summary>
+public sealed class EffectBlock
+{
+    public List<SkillCondition> Conditions  { get; set; } = new();
+    public List<SkillEffect>    Effects     { get; set; } = new();   // applied while conditions hold
+    public List<SkillEffect>    ElseEffects { get; set; } = new();   // applied while conditions do NOT hold (if/else)
+}
+
 public sealed class RpSkill
 {
     public Guid                 Id                { get; set; } = Guid.NewGuid();
@@ -34,7 +46,8 @@ public sealed class RpSkill
     public int                  Duration          { get; set; } = 0;
     public int                  DurationRemaining { get; set; } = 0;
     public bool                 IsLocked          { get; set; } = false;
-    public List<SkillCondition> Conditions        { get; set; } = new();
-    public List<SkillEffect>    Effects           { get; set; } = new();
+    public List<SkillCondition> Conditions        { get; set; } = new();   // base block conditions (gate base Effects)
+    public List<SkillEffect>    Effects           { get; set; } = new();   // base block effects
+    public List<EffectBlock>    ConditionalBlocks { get; set; } = new();   // extra independent if-blocks, summed when met
     public bool                 TriggerOnTurnEnd  { get; set; } = false;
 }

@@ -43,6 +43,16 @@ public sealed class RpStateStore
     public IEnumerable<CharacterDto> CharactersIn(string code)
         => _characters.Values.Where(c => c.PartyCode == code);
 
+    /// <summary>Companion entities in a campaign owned by the given player.</summary>
+    public IEnumerable<CharacterDto> CompanionsOf(string code, string ownerPlayerId)
+        => _characters.Values.Where(c => c.PartyCode == code
+                                      && c.Kind == EntityKind.Companion
+                                      && c.OwnerPlayerId == ownerPlayerId);
+
+    /// <summary>NPC entities visible to this client in a campaign (DmOnly NPCs are already filtered server-side).</summary>
+    public IEnumerable<CharacterDto> NpcsIn(string code)
+        => _characters.Values.Where(c => c.PartyCode == code && c.Kind == EntityKind.Npc);
+
     public InitiativeStateDto? Initiative(string? code) => code != null && _initiatives.TryGetValue(code, out var i) ? i : null;
     public IReadOnlyCollection<InitiativeStateDto> Initiatives => _initiatives.Values.ToList();
 
@@ -65,7 +75,7 @@ public sealed class RpStateStore
 
         foreach (var p in s.Parties)     _parties[p.Code]     = p;
         foreach (var t in s.Templates)   _templates[t.PartyCode] = t;
-        foreach (var c in s.Characters)  _characters[(c.PartyCode, c.PlayerId)] = c;
+        foreach (var c in s.Characters)  _characters[(c.PartyCode, c.EntityId)] = c;
         foreach (var i in s.Initiatives) _initiatives[i.PartyCode] = i;
         foreach (var b in s.Bags)        _bags[b.BagId]       = b;
         foreach (var r in s.Rooms)       _rooms[r.Code]       = r;
@@ -103,10 +113,15 @@ public sealed class RpStateStore
 
     public void ApplyCharacter(CharacterDto c)
     {
-        var key = (c.PartyCode, c.PlayerId);
+        var key = (c.PartyCode, c.EntityId);
         if (_characters.TryGetValue(key, out var cur) && cur.Version > c.Version) return;
         _characters[key] = c;
         Raise();
+    }
+
+    public void RemoveCharacter(string code, string entityId)
+    {
+        if (_characters.Remove((code, entityId))) Raise();
     }
 
     public void ApplyTemplate(TemplateDto t)
