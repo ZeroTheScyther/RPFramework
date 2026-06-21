@@ -23,9 +23,6 @@ public class SkillsWindow : Window, IDisposable
     private int  _selectedIdx = -1;
     private bool _dirty;
 
-    private static readonly string[] CondOpNames   = { "<", "≤", "=", "≥", ">" };
-    private static readonly string[] EffectOpNames = { "+", "−", "=", "×", "÷" };
-
     public SkillsWindow(Plugin plugin)
         : base("RP Skills & Passives##RPFramework.Skills",
                ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse)
@@ -63,6 +60,9 @@ public class SkillsWindow : Window, IDisposable
         Effects    = s.Effects.Select(e => new SkillEffect { FieldId = e.FieldId, Op = e.Op, Value = e.Value, IsPercentage = e.IsPercentage }).ToList(),
     };
 
+    /// <summary>Re-pull the draft from the authoritative store (call when entering the Skills tab).</summary>
+    internal void SyncFromStore() => SyncDraft();
+
     public override void Draw()
     {
         string? code = plugin.ActiveCampaign;
@@ -71,12 +71,19 @@ public class SkillsWindow : Window, IDisposable
             ImGui.TextDisabled("Connect and select a campaign to manage skills.");
             return;
         }
+        DrawBody(code);
+    }
 
+    /// <summary>The skills editor body (left list + right editor), hosted standalone or in the RPCHARACTER Skills tab.</summary>
+    internal void DrawBody(string code)
+    {
+        var character = plugin.ActiveCharacter;
+        if (character == null) { ImGui.TextDisabled("No character in this campaign yet."); return; }
         float scale = ImGuiHelpers.GlobalScale;
         var   template = plugin.Store.TemplateOrDefault(code);
 
         // If the authoritative skill count changed (e.g. another device) and we're clean, re-sync.
-        if (!_dirty && plugin.ActiveCharacter.State.Skills.Count != _draft.Count) SyncDraft();
+        if (!_dirty && character.State.Skills.Count != _draft.Count) SyncDraft();
 
         // ── Left pane ──────────────────────────────────────────────────────────
         float leftW = 180 * scale;
@@ -89,7 +96,7 @@ public class SkillsWindow : Window, IDisposable
                 for (int i = 0; i < _draft.Count; i++)
                 {
                     var    sk    = _draft[i];
-                    var    live  = plugin.ActiveCharacter.State.Skills.FirstOrDefault(s => s.Id == sk.Id);
+                    var    live  = character.State.Skills.FirstOrDefault(s => s.Id == sk.Id);
                     string badge = sk.Type == SkillType.Active ? "[A]" : "[P]";
                     string tag   = live is { DurationRemaining: > 0 } ? $" [{live.DurationRemaining}t]"
                                  : live is { CooldownRemaining: > 0 } ? $" (cd:{live.CooldownRemaining}t)"
@@ -194,16 +201,18 @@ public class SkillsWindow : Window, IDisposable
         if (skill.Type == SkillType.Passive)
         {
             ImGui.TextUnformatted("Conditions  (fires when ALL are true)");
-            DrawParts(skill.Conditions, allFields, fieldNames, scale, isCondition: true);
+            DrawParts(skill.Conditions, allFields, fieldNames, scale);
             if (ImGui.SmallButton("+ Add Condition##rpsk_addcond"))
             { skill.Conditions.Add(new SkillCondition { FieldId = allFields.FirstOrDefault()?.Id ?? "" }); _dirty = true; }
             ImGui.Spacing(); ImGui.Separator();
         }
 
         ImGui.TextUnformatted("Effects");
-        DrawParts(skill.Effects, allFields, fieldNames, scale, isCondition: false);
+        var fxFields = EffectEditor.TargetFields(template);
+        var fxNames  = fxFields.Select(f => f.Name).ToArray();
+        DrawEffects(skill.Effects, fxFields, fxNames, scale);
         if (ImGui.SmallButton("+ Add Effect##rpsk_addefx"))
-        { skill.Effects.Add(new SkillEffect { FieldId = allFields.FirstOrDefault()?.Id ?? "" }); _dirty = true; }
+        { skill.Effects.Add(new SkillEffect { FieldId = fxFields.FirstOrDefault()?.Id ?? "" }); _dirty = true; }
 
         // ── Use / activate (authoritative; disabled while unsaved or on cooldown) ──
         ImGui.Spacing(); ImGui.Separator(); ImGui.Spacing();
@@ -217,26 +226,14 @@ public class SkillsWindow : Window, IDisposable
         else if (live is { CooldownRemaining: > 0 }) { ImGui.SameLine(); ImGui.TextDisabled($"({live.CooldownRemaining}t cooldown)"); }
     }
 
-    private void DrawParts(List<SkillCondition> conds, List<SheetField> allFields, string[] fieldNames, float scale, bool isCondition)
+    private void DrawParts(List<SkillCondition> conds, List<SheetField> allFields, string[] fieldNames, float scale)
     {
         if (!ImGui.BeginTable("##rpsk_conds", 5, ImGuiTableFlags.SizingFixedFit | ImGuiTableFlags.BordersInnerV)) return;
         SetupPartCols(scale);
         for (int i = conds.Count - 1; i >= 0; i--)
         {
-            var c = conds[i];
             ImGui.TableNextRow(); ImGui.PushID($"##cond{i}");
-            ImGui.TableSetColumnIndex(0); ImGui.SetNextItemWidth(76 * scale);
-            int fi = Math.Max(0, allFields.FindIndex(f => f.Id == c.FieldId));
-            if (ImGui.Combo("##cs", ref fi, fieldNames, fieldNames.Length)) { c.FieldId = allFields[fi].Id; _dirty = true; }
-            ImGui.TableSetColumnIndex(1); ImGui.SetNextItemWidth(48 * scale);
-            int opI = (int)c.Op;
-            if (ImGui.Combo("##co", ref opI, CondOpNames, CondOpNames.Length)) { c.Op = (ConditionOp)opI; _dirty = true; }
-            ImGui.TableSetColumnIndex(2); ImGui.SetNextItemWidth(56 * scale);
-            float val = c.Value;
-            if (ImGui.InputFloat("##cv", ref val, 0f, 0f, "%.0f")) { c.Value = val; _dirty = true; }
-            ImGui.TableSetColumnIndex(3);
-            bool pct = c.IsPercentage;
-            if (ImGui.Checkbox("##cpct", ref pct)) { c.IsPercentage = pct; _dirty = true; }
+            if (ConditionEditor.DrawRow(conds[i], allFields, fieldNames)) _dirty = true;
             ImGui.TableSetColumnIndex(4);
             if (ImGui.SmallButton($"X##cdel{i}")) { conds.RemoveAt(i); _dirty = true; }
             ImGui.PopID();
@@ -244,26 +241,14 @@ public class SkillsWindow : Window, IDisposable
         ImGui.EndTable();
     }
 
-    private void DrawParts(List<SkillEffect> fxs, List<SheetField> allFields, string[] fieldNames, float scale, bool isCondition)
+    private void DrawEffects(List<SkillEffect> fxs, List<SheetField> fields, string[] fieldNames, float scale)
     {
         if (!ImGui.BeginTable("##rpsk_efx", 5, ImGuiTableFlags.SizingFixedFit | ImGuiTableFlags.BordersInnerV)) return;
         SetupPartCols(scale);
         for (int i = fxs.Count - 1; i >= 0; i--)
         {
-            var fx = fxs[i];
             ImGui.TableNextRow(); ImGui.PushID($"##efx{i}");
-            ImGui.TableSetColumnIndex(0); ImGui.SetNextItemWidth(76 * scale);
-            int fi = Math.Max(0, allFields.FindIndex(f => f.Id == fx.FieldId));
-            if (ImGui.Combo("##et", ref fi, fieldNames, fieldNames.Length)) { fx.FieldId = allFields[fi].Id; _dirty = true; }
-            ImGui.TableSetColumnIndex(1); ImGui.SetNextItemWidth(48 * scale);
-            int opI = (int)fx.Op;
-            if (ImGui.Combo("##eo", ref opI, EffectOpNames, EffectOpNames.Length)) { fx.Op = (EffectOp)opI; _dirty = true; }
-            ImGui.TableSetColumnIndex(2); ImGui.SetNextItemWidth(56 * scale);
-            float val = fx.Value;
-            if (ImGui.InputFloat("##ev", ref val, 0f, 0f, "%.1f")) { fx.Value = val; _dirty = true; }
-            ImGui.TableSetColumnIndex(3);
-            bool pct = fx.IsPercentage;
-            if (ImGui.Checkbox("##epct", ref pct)) { fx.IsPercentage = pct; _dirty = true; }
+            if (EffectEditor.DrawRow(fxs[i], fields, fieldNames)) _dirty = true;
             ImGui.TableSetColumnIndex(4);
             if (ImGui.SmallButton($"X##edel{i}")) { fxs.RemoveAt(i); _dirty = true; }
             ImGui.PopID();

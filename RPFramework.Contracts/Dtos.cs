@@ -88,15 +88,16 @@ public record InitiativeStateDto(
 // ── Inventory (personal + shared bags are unified) ───────────────────────────
 
 public record RpItemDto(
-    Guid               Id,
-    string             Name,
-    string             Description,
-    uint               IconId,
-    int                Amount,
-    RpItemType         Type     = RpItemType.Normal,
-    int                Capacity = 10,
-    List<RpItemDto>?   Contents = null,
-    List<SkillEffect>? Effects  = null   // always-on stat effects for equippable items (null = none)
+    Guid                  Id,
+    string                Name,
+    string                Description,
+    uint                  IconId,
+    int                   Amount,
+    RpItemType            Type       = RpItemType.Normal,
+    int                   Capacity   = 10,
+    List<RpItemDto>?      Contents   = null,
+    List<SkillEffect>?    Effects    = null,  // stat effects for equippable/consumable items (null = none)
+    List<SkillCondition>? Conditions = null   // equipped gear: effects apply only while ALL are met (null/empty = always-on)
 );
 
 public record BagDto(
@@ -123,6 +124,13 @@ public record BagShareInviteDto(
     string OwnerPlayerId,
     string OwnerDisplayName,
     string BagName
+);
+
+public record BagShareDeclinedDto(
+    Guid   BagId,
+    string BagName,
+    string DeclinerPlayerId,
+    string DeclinerDisplayName
 );
 
 // ── BGM ──────────────────────────────────────────────────────────────────────

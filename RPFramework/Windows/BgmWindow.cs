@@ -83,7 +83,8 @@ public class BgmWindow : Window, IDisposable
                     {
                         if (ImGui.MenuItem("Open player")) OpenRoom(room.Code, null);
                         if (ImGui.MenuItem("Copy code")) ImGui.SetClipboardText(room.Code);
-                        if (ImGui.MenuItem("Leave room")) plugin.Bgm.LeaveRoom(room.Code);
+                        bool isOwner = room.OwnerPlayerId == plugin.LocalPlayerId;
+                        if (ImGui.MenuItem(isOwner ? "Dissolve room" : "Leave room")) plugin.Bgm.LeaveRoom(room.Code);
                         ImGui.EndPopup();
                     }
                     ImGui.PopID();

@@ -43,7 +43,8 @@ public sealed class InventoryGridView
     private int        _capacity = 10;
     private string     _iconQuery = "", _lastIconQuery = "";
     private readonly List<(string Name, uint IconId)> _iconResults = new();
-    private readonly List<SkillEffect> _effects = new();
+    private readonly List<SkillEffect>    _effects    = new();
+    private readonly List<SkillCondition> _conditions = new();
 
     // Amount prompt, shared by Split and stackable trades
     private bool        _pendingAmt, _amtOpen;
@@ -81,12 +82,16 @@ public sealed class InventoryGridView
         _pendingAmt = true;
     }
 
-    public void DrawGrid(BagDto bag, Guid[] path, List<RpItemDto> items, List<BagDto> allBags, string code)
+    /// <summary>Draws a container's slot grid. <paramref name="capacity"/> (a nested bag's slot count)
+    /// fixes the number of slots; the inventory root passes null and grows in rows of <see cref="Cols"/>.</summary>
+    public void DrawGrid(BagDto bag, Guid[] path, List<RpItemDto> items, List<BagDto> allBags, string code, int? capacity = null)
     {
         float sz  = SlotPx * ImGuiHelpers.GlobalScale;
         float pad = PadPx  * ImGuiHelpers.GlobalScale;
         int   count = items.Count;
-        int   total = Math.Max(MinSlots, ((count + Cols) / Cols) * Cols);
+        int   total = capacity is int cap
+            ? Math.Max(count, Math.Max(1, cap))                        // exactly `cap` slots (more only if over-full)
+            : Math.Max(MinSlots, ((count + Cols) / Cols) * Cols);
 
         for (int i = 0; i < total; i++)
         {
@@ -174,6 +179,8 @@ public sealed class InventoryGridView
             else if (item.Amount > 1) ImGui.TextDisabled($"Amount: {item.Amount}");
             if (item.Effects is { Count: > 0 })
                 ImGui.TextColored(new Vector4(0.45f, 0.85f, 0.45f, 1f), ItemEffects.Summary(item.Effects, plugin.Store.TemplateOrDefault(code)));
+            if (item.Conditions is { Count: > 0 })
+                ImGui.TextColored(new Vector4(0.70f, 0.70f, 0.45f, 1f), $"While: {ItemEffects.ConditionSummary(item.Conditions, plugin.Store.TemplateOrDefault(code))}");
             if (!string.IsNullOrWhiteSpace(item.Description))
             {
                 ImGui.PushTextWrapPos(260 * ImGuiHelpers.GlobalScale);
@@ -187,6 +194,7 @@ public sealed class InventoryGridView
         {
             if (isBag && ImGui.MenuItem("Open")) plugin.OpenBag(bag.BagId, path.Append(item.Id).ToArray(), item.Name);
             if (item.Type == RpItemType.Consumable && ImGui.MenuItem("Use")) _ = plugin.Network.UseItem(bag.BagId, path, item.Id);
+            if (item.Type.IsEquippable() && ImGui.MenuItem($"Equip ({item.Type.Label()})")) _ = plugin.Network.EquipItem(bag.BagId, path, item.Id);
             if (ImGui.MenuItem("Edit")) OpenItemModal(bag.BagId, path, code, item);
             if (ImGui.MenuItem("Copy")) _ = plugin.Network.ItemAdd(bag.BagId, path, item with { Id = Guid.NewGuid() });
 
@@ -268,6 +276,9 @@ public sealed class InventoryGridView
         _effects.Clear();
         if (item?.Effects != null)
             _effects.AddRange(item.Effects.Select(e => new SkillEffect { FieldId = e.FieldId, Op = e.Op, Value = e.Value, IsPercentage = e.IsPercentage }));
+        _conditions.Clear();
+        if (item?.Conditions != null)
+            _conditions.AddRange(item.Conditions.Select(c => new SkillCondition { FieldId = c.FieldId, Op = c.Op, Value = c.Value, IsPercentage = c.IsPercentage }));
         _pendingItem = true;
     }
 
@@ -302,6 +313,17 @@ public sealed class InventoryGridView
         if (_type.IsEquippable() || _type == RpItemType.Consumable)
         {
             ImGui.Spacing();
+            // Conditional gear only contributes its effects while ALL conditions hold (like a passive);
+            // with no conditions the effects are always-on. Consumables are point-of-use, so no gate.
+            if (_type.IsEquippable())
+            {
+                ImGui.TextDisabled(_conditions.Count == 0
+                    ? "Conditions (none = effects always active while equipped):"
+                    : "Conditions (effects apply only while ALL are true):");
+                DrawItemConditions(scale);
+                ImGui.Spacing();
+            }
+
             ImGui.TextDisabled(_type == RpItemType.Consumable ? "Effects (applied on Use):" : "Effects (while equipped):");
             DrawItemEffects(scale);
         }
@@ -339,7 +361,10 @@ public sealed class InventoryGridView
                 List<SkillEffect>? fx = (_type.IsEquippable() || _type == RpItemType.Consumable) && _effects.Count > 0
                     ? _effects.Select(e => new SkillEffect { FieldId = e.FieldId, Op = e.Op, Value = e.Value, IsPercentage = e.IsPercentage }).ToList()
                     : null;
-                var dto = new RpItemDto(_editItemId ?? Guid.NewGuid(), _name.Trim(), _desc, _iconId, _amount, _type, _capacity, null, fx);
+                List<SkillCondition>? conds = _type.IsEquippable() && _conditions.Count > 0
+                    ? _conditions.Select(c => new SkillCondition { FieldId = c.FieldId, Op = c.Op, Value = c.Value, IsPercentage = c.IsPercentage }).ToList()
+                    : null;
+                var dto = new RpItemDto(_editItemId ?? Guid.NewGuid(), _name.Trim(), _desc, _iconId, _amount, _type, _capacity, null, fx, conds);
                 if (_editItemId == null) _ = plugin.Network.ItemAdd(_itemBag, _itemPath, dto);
                 else                     _ = plugin.Network.ItemUpdate(_itemBag, _itemPath, dto);
                 _itemOpen = false; ImGui.CloseCurrentPopup();
@@ -348,8 +373,6 @@ public sealed class InventoryGridView
         if (ImGui.Button("Cancel##canit", new Vector2(bw, 0))) { _itemOpen = false; ImGui.CloseCurrentPopup(); }
         ImGui.EndPopup();
     }
-
-    private static readonly string[] EffectOpNames = { "+", "-", "=", "x", "/" };
 
     /// <summary>Item types selectable in the modal: Misc, Bag (root only), the equip slots, then Consumable.</summary>
     private RpItemType[] AllowedTypes()
@@ -364,9 +387,10 @@ public sealed class InventoryGridView
     private void DrawItemEffects(float scale)
     {
         var template = plugin.Store.TemplateOrDefault(_itemCode);
-        var fields    = template.Groups.SelectMany(g => g.Fields).ToList();
+        // Equipment effects only raise a pool's max; consumables can also touch the current value.
+        var fields    = EffectEditor.TargetFields(template, includeBarCurrent: _type == RpItemType.Consumable);
         var names     = fields.Select(f => f.Name).ToArray();
-        if (fields.Count == 0) { ImGui.TextDisabled("Publish a sheet template first to add effects."); return; }
+        if (fields.Count == 0) { ImGui.TextDisabled("Publish a sheet template with stats to add effects."); return; }
 
         if (ImGui.BeginTable("##itefx", 5, ImGuiTableFlags.SizingFixedFit | ImGuiTableFlags.BordersInnerV))
         {
@@ -378,20 +402,8 @@ public sealed class InventoryGridView
             ImGui.TableHeadersRow();
             for (int i = _effects.Count - 1; i >= 0; i--)
             {
-                var fx = _effects[i];
                 ImGui.TableNextRow(); ImGui.PushID($"##itfx{i}");
-                ImGui.TableSetColumnIndex(0); ImGui.SetNextItemWidth(-1);
-                int fi = Math.Max(0, fields.FindIndex(f => f.Id == fx.FieldId));
-                if (ImGui.Combo("##f", ref fi, names, names.Length)) fx.FieldId = fields[fi].Id;
-                ImGui.TableSetColumnIndex(1); ImGui.SetNextItemWidth(-1);
-                int opI = (int)fx.Op;
-                if (ImGui.Combo("##o", ref opI, EffectOpNames, EffectOpNames.Length)) fx.Op = (EffectOp)opI;
-                ImGui.TableSetColumnIndex(2); ImGui.SetNextItemWidth(-1);
-                float v = fx.Value;
-                if (ImGui.InputFloat("##v", ref v, 0f, 0f, "%.1f")) fx.Value = v;
-                ImGui.TableSetColumnIndex(3);
-                bool p = fx.IsPercentage;
-                if (ImGui.Checkbox("##p", ref p)) fx.IsPercentage = p;
+                EffectEditor.DrawRow(_effects[i], fields, names);
                 ImGui.TableSetColumnIndex(4);
                 if (ImGui.SmallButton($"X##d{i}")) _effects.RemoveAt(i);
                 ImGui.PopID();
@@ -399,6 +411,34 @@ public sealed class InventoryGridView
             ImGui.EndTable();
         }
         if (ImGui.SmallButton("+ Add effect")) _effects.Add(new SkillEffect { FieldId = fields.FirstOrDefault()?.Id ?? "" });
+    }
+
+    private void DrawItemConditions(float scale)
+    {
+        var template = plugin.Store.TemplateOrDefault(_itemCode);
+        var fields   = ConditionEditor.TargetFields(template);
+        var names    = fields.Select(f => f.Name).ToArray();
+        if (fields.Count == 0) { ImGui.TextDisabled("Publish a sheet template with stats to add conditions."); return; }
+
+        if (_conditions.Count > 0 && ImGui.BeginTable("##itcond", 5, ImGuiTableFlags.SizingFixedFit | ImGuiTableFlags.BordersInnerV))
+        {
+            ImGui.TableSetupColumn("Field", ImGuiTableColumnFlags.WidthFixed, 96 * scale);
+            ImGui.TableSetupColumn("Op",    ImGuiTableColumnFlags.WidthFixed, 44 * scale);
+            ImGui.TableSetupColumn("Value", ImGuiTableColumnFlags.WidthFixed, 56 * scale);
+            ImGui.TableSetupColumn("%",     ImGuiTableColumnFlags.WidthFixed, 22 * scale);
+            ImGui.TableSetupColumn("",      ImGuiTableColumnFlags.WidthFixed, 22 * scale);
+            ImGui.TableHeadersRow();
+            for (int i = _conditions.Count - 1; i >= 0; i--)
+            {
+                ImGui.TableNextRow(); ImGui.PushID($"##itcd{i}");
+                ConditionEditor.DrawRow(_conditions[i], fields, names);
+                ImGui.TableSetColumnIndex(4);
+                if (ImGui.SmallButton($"X##cd{i}")) _conditions.RemoveAt(i);
+                ImGui.PopID();
+            }
+            ImGui.EndTable();
+        }
+        if (ImGui.SmallButton("+ Add condition")) _conditions.Add(new SkillCondition { FieldId = fields.FirstOrDefault()?.Id ?? "" });
     }
 
     private void RefreshIcons()

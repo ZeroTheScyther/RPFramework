@@ -38,6 +38,7 @@ public sealed class NetworkService : IDisposable
     public event Action<DiceRollResultDto>? DiceRollReceived;
     public event Action<TradeOfferDto>?     TradeOfferReceived;
     public event Action<BagShareInviteDto>? BagShareInviteReceived;
+    public event Action<BagShareDeclinedDto>? BagShareDeclined;
     public event Action<string, string>?    ErrorReceived;   // context, message
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -130,6 +131,7 @@ public sealed class NetworkService : IDisposable
         _conn.On<DiceRollResultDto>(Ev.DiceRoll,           d => Fire(() => DiceRollReceived?.Invoke(d)));
         _conn.On<TradeOfferDto>(Ev.TradeOffered,           o => Fire(() => TradeOfferReceived?.Invoke(o)));
         _conn.On<BagShareInviteDto>(Ev.BagShareInvited,    i => Fire(() => BagShareInviteReceived?.Invoke(i)));
+        _conn.On<BagShareDeclinedDto>(Ev.BagShareDeclined, d => Fire(() => BagShareDeclined?.Invoke(d)));
         _conn.On<string, string>(Ev.Error,        (ctx, msg) => Fire(() => ErrorReceived?.Invoke(ctx, msg)));
     }
 
@@ -180,6 +182,10 @@ public sealed class NetworkService : IDisposable
         => SafeInvoke(In.ItemSplit, bagId, path, itemId, amount);
     public Task UseItem(Guid bagId, Guid[] path, Guid itemId)
         => SafeInvoke(In.UseItem, bagId, path, itemId);
+    public Task EquipItem(Guid bagId, Guid[] path, Guid itemId)
+        => SafeInvoke(In.EquipItem, bagId, path, itemId);
+    public Task UnequipItem(string code, RpItemType slot, Guid toBagId)
+        => SafeInvoke(In.UnequipItem, code, slot, toBagId);
     public Task BagShareInvite(Guid bagId, string toId) => SafeInvoke(In.BagShareInvite, bagId, toId);
     public Task BagShareAccept(Guid bagId)              => SafeInvoke(In.BagShareAccept, bagId);
     public Task BagShareDecline(Guid bagId)             => SafeInvoke(In.BagShareDecline, bagId);

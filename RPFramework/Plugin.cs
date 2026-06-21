@@ -31,7 +31,8 @@ public sealed class Plugin : IDalamudPlugin
     private const string CmdHub = "/rphub", CmdIni = "/rpini", CmdInventory = "/rpinventory",
         CmdInventoryShort = "/rpinv", CmdBgm = "/rpbgm", CmdSettings = "/rpsettings",
         CmdSheet = "/rpsheet", CmdSheetShort = "/rpcs", CmdStats = "/rpstats", CmdDice = "/rpdice",
-        CmdSkills = "/rpskills", CmdSkillsShort = "/rpsk", CmdHelp = "/rphelp";
+        CmdSkills = "/rpskills", CmdSkillsShort = "/rpsk", CmdEquipment = "/rpequipment",
+        CmdCharacter = "/rpcharacter", CmdHelp = "/rphelp";
     private const string DefaultServerUrl = "https://rpframework.example.com";
 
     public Configuration Configuration { get; init; }
@@ -52,7 +53,8 @@ public sealed class Plugin : IDalamudPlugin
     internal SettingsWindow         SettingsWindow          { get; }
     internal CharacterSheetWindow   CharacterSheetWindow    { get; }
     private DiceRollerWindow        DiceRollerWindow        { get; }
-    private SkillsWindow            SkillsWindow            { get; }
+    internal SkillsWindow           SkillsWindow            { get; }
+    internal RpCharacterWindow      RpCharacterWindow       { get; }
     private HelpWindow              HelpWindow              { get; }
 
     // Dynamic read-only windows for remote players, keyed by playerId
@@ -94,13 +96,14 @@ public sealed class Plugin : IDalamudPlugin
         CharacterSheetWindow    = new CharacterSheetWindow(this);
         DiceRollerWindow        = new DiceRollerWindow(this);
         SkillsWindow            = new SkillsWindow(this);
+        RpCharacterWindow       = new RpCharacterWindow(this);
         HelpWindow              = new HelpWindow();
 
         foreach (var w in new Window[]
         {
             HubWindow, InitiativeWindow, InventoryWindow, BgmWindow, BgmPlayerWindow,
             TradeNotificationWindow, BagShareInviteWindow, SettingsWindow, CharacterSheetWindow,
-            DiceRollerWindow, SkillsWindow, HelpWindow,
+            DiceRollerWindow, SkillsWindow, RpCharacterWindow, HelpWindow,
         }) WindowSystem.AddWindow(w);
 
         Network.Connected              += OnConnected;
@@ -109,6 +112,7 @@ public sealed class Plugin : IDalamudPlugin
         Network.DiceRollReceived       += OnDiceRollReceived;
         Network.TradeOfferReceived     += OnTradeOfferReceived;
         Network.BagShareInviteReceived += OnBagShareInvite;
+        Network.BagShareDeclined += OnBagShareDeclined;
         Network.ErrorReceived          += OnError;
 
         ContextMenu.OnMenuOpened += OnContextMenuOpened;
@@ -118,12 +122,14 @@ public sealed class Plugin : IDalamudPlugin
         AddCommand(CmdInventoryShort, OnInventoryCmd, "Opens the RP Inventory");
         AddCommand(CmdBgm, OnBgmCmd, "Opens the RP BGM music player");
         AddCommand(CmdSettings, OnSettingsCmd, "Opens RPFramework Settings");
-        AddCommand(CmdSheet, OnSheetCmd, "Opens the RP Character Sheet");
-        AddCommand(CmdSheetShort, OnSheetCmd, "Opens the RP Character Sheet");
-        AddCommand(CmdStats, OnSheetCmd, "Opens the RP Character Sheet");
+        AddCommand(CmdCharacter, OnCharacterCmd, "Opens the RP Character window");
+        AddCommand(CmdSheet, OnSheetCmd, "Opens the RP Character window (Sheet tab)");
+        AddCommand(CmdSheetShort, OnSheetCmd, "Opens the RP Character window (Sheet tab)");
+        AddCommand(CmdStats, OnSheetCmd, "Opens the RP Character window (Sheet tab)");
         AddCommand(CmdDice, OnDiceCmd, "Opens dice roller, or rolls immediately: /rpdice [d4/.../dN]");
-        AddCommand(CmdSkills, OnSkillsCmd, "Opens the RP Skills & Passives window");
-        AddCommand(CmdSkillsShort, OnSkillsCmd, "Opens the RP Skills & Passives window");
+        AddCommand(CmdSkills, OnSkillsCmd, "Opens the RP Character window (Skills tab)");
+        AddCommand(CmdSkillsShort, OnSkillsCmd, "Opens the RP Character window (Skills tab)");
+        AddCommand(CmdEquipment, OnEquipmentCmd, "Opens the RP Character window (Equipment tab)");
         AddCommand(CmdIni, OnIniCmd, "Opens the RP Initiative tracker");
         AddCommand(CmdHelp, OnHelpCmd, "Opens the RPFramework help window");
 
@@ -147,6 +153,7 @@ public sealed class Plugin : IDalamudPlugin
         Network.DiceRollReceived       -= OnDiceRollReceived;
         Network.TradeOfferReceived     -= OnTradeOfferReceived;
         Network.BagShareInviteReceived -= OnBagShareInvite;
+        Network.BagShareDeclined -= OnBagShareDeclined;
         Network.ErrorReceived          -= OnError;
         ContextMenu.OnMenuOpened       -= OnContextMenuOpened;
 
@@ -164,13 +171,13 @@ public sealed class Plugin : IDalamudPlugin
         {
             HubWindow, InitiativeWindow, InventoryWindow, BgmWindow, BgmPlayerWindow,
             TradeNotificationWindow, BagShareInviteWindow, SettingsWindow, CharacterSheetWindow,
-            DiceRollerWindow, SkillsWindow, BgmService, Network,
+            DiceRollerWindow, SkillsWindow, RpCharacterWindow, BgmService, Network,
         }) w.Dispose();
 
         foreach (var cmd in new[]
         {
             CmdHub, CmdInventory, CmdInventoryShort, CmdBgm, CmdSettings, CmdSheet, CmdSheetShort,
-            CmdStats, CmdDice, CmdSkills, CmdSkillsShort, CmdIni, CmdHelp,
+            CmdStats, CmdDice, CmdSkills, CmdSkillsShort, CmdEquipment, CmdCharacter, CmdIni, CmdHelp,
         }) CommandManager.RemoveHandler(cmd);
     }
 
@@ -279,19 +286,23 @@ public sealed class Plugin : IDalamudPlugin
     private void OnIniCmd(string c, string a)       => InitiativeWindow.Toggle();
     private void OnHelpCmd(string c, string a)      => HelpWindow.Toggle();
 
+    private void OnCharacterCmd(string c, string args) => RpCharacterWindow.OpenTo(RpCharacterWindow.Tab.Profile);
+
     private void OnSheetCmd(string c, string args)
     {
         string target = args.Trim().Trim('"');
-        if (string.IsNullOrWhiteSpace(target)) CharacterSheetWindow.Toggle();
+        if (string.IsNullOrWhiteSpace(target)) RpCharacterWindow.OpenTo(RpCharacterWindow.Tab.Stats);
         else OpenPlayerSheet(target);
     }
 
     private void OnSkillsCmd(string c, string args)
     {
         string target = args.Trim().Trim('"');
-        if (string.IsNullOrWhiteSpace(target)) SkillsWindow.Toggle();
+        if (string.IsNullOrWhiteSpace(target)) RpCharacterWindow.OpenTo(RpCharacterWindow.Tab.Skills);
         else OpenPlayerSkills(target);
     }
+
+    private void OnEquipmentCmd(string c, string args) => RpCharacterWindow.OpenTo(RpCharacterWindow.Tab.Equipment);
 
     private void OnDiceCmd(string c, string args)
     {
@@ -326,6 +337,19 @@ public sealed class Plugin : IDalamudPlugin
     {
         BagShareInviteWindow.AddInvite(invite);
         BagShareInviteWindow.IsOpen = true;
+    }
+
+    private void OnBagShareDeclined(BagShareDeclinedDto d)
+    {
+        // ChatGui.Print injects into our OWN client log only (never sent to SQEX servers) — TOS-safe.
+        ChatGui.Print(new Dalamud.Game.Text.XivChatEntry
+        {
+            Message = new Dalamud.Game.Text.SeStringHandling.SeStringBuilder()
+                .AddUiForeground("[RPInv] ", 32)
+                .AddText($"{d.DeclinerDisplayName} declined to share \"{d.BagName}\".")
+                .Build(),
+            Type = Dalamud.Game.Text.XivChatType.Echo,
+        });
     }
 
     private void OnError(string ctx, string msg) => Log.Warning("[Server] {0}: {1}", ctx, msg);
@@ -376,7 +400,7 @@ public sealed class Plugin : IDalamudPlugin
     public void OpenSheetForParty(string code)
     {
         SetActiveCampaign(code);
-        CharacterSheetWindow.IsOpen = true;
+        RpCharacterWindow.OpenTo(RpCharacterWindow.Tab.Stats);
     }
 
     private void OnContextMenuOpened(IMenuOpenedArgs args)

@@ -97,7 +97,7 @@ public class DiceRollerWindow : Window, IDisposable
         ImGui.Combo("##rpspecmod", ref _specIdx, specOptions, specOptions.Length);
         if (_specIdx > 0 && state != null)
         {
-            state.CheckValues.TryGetValue(checkFields[_specIdx - 1].Id, out bool prof);
+            bool prof = StatMath.EffectiveCheck(state, checkFields[_specIdx - 1].Id, template);
             ImGui.SameLine();
             ImGui.TextDisabled(prof ? "(proficient)" : "(no proficiency)");
         }

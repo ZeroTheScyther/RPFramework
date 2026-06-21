@@ -53,6 +53,8 @@ public static class HubRoutes
         public const string ItemMove         = nameof(ItemMove);
         public const string ItemSplit        = nameof(ItemSplit);
         public const string UseItem          = nameof(UseItem);
+        public const string EquipItem        = nameof(EquipItem);
+        public const string UnequipItem      = nameof(UnequipItem);
         public const string BagShareInvite   = nameof(BagShareInvite);
         public const string BagShareAccept   = nameof(BagShareAccept);
         public const string BagShareDecline  = nameof(BagShareDecline);
@@ -85,6 +87,7 @@ public static class HubRoutes
         public const string BagUpdated          = nameof(BagUpdated);          // BagDto
         public const string BagRemoved          = nameof(BagRemoved);          // Guid bagId
         public const string BagShareInvited     = nameof(BagShareInvited);     // BagShareInviteDto
+        public const string BagShareDeclined    = nameof(BagShareDeclined);    // BagShareDeclinedDto
         public const string TradeOffered        = nameof(TradeOffered);        // TradeOfferDto
         public const string RoomUpdated         = nameof(RoomUpdated);         // RoomStateDto
         public const string RoomRemoved         = nameof(RoomRemoved);         // string code

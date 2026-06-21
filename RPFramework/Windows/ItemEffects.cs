@@ -16,7 +16,17 @@ public static class ItemEffects
         var parts = new List<string>();
         foreach (var fx in effects)
         {
-            string field = template?.FindField(fx.FieldId)?.Name ?? fx.FieldId;
+            var (baseId, targetMax) = StatMath.SplitBarTarget(fx.FieldId);
+            var    sf    = template?.FindField(baseId);
+            string field = sf == null ? fx.FieldId : targetMax ? "Max" + sf.Name : sf.Name;
+
+            // Proficiency (Checkbox) effects are a plain grant/remove, not arithmetic.
+            if (sf?.Type == FieldType.Checkbox)
+            {
+                parts.Add(fx.Value >= 1f ? $"Grants {field}" : $"Removes {field}");
+                continue;
+            }
+
             string val   = fx.Value.ToString("0.##");
             string pct   = fx.IsPercentage ? "%" : "";
             string text = fx.Op switch
@@ -29,6 +39,26 @@ public static class ItemEffects
                 _                 => val,
             };
             parts.Add(string.IsNullOrEmpty(field) ? text : $"{text} {field}");
+        }
+        return string.Join(", ", parts);
+    }
+
+    private static readonly string[] CondOps = { "<", "<=", "=", ">=", ">" };
+
+    /// <summary>
+    /// Compact human summary of an equipped item's gate conditions, e.g. "HP &lt;= 50%, STR &gt;= 12".
+    /// Returns "" when there are none (item is always-on).
+    /// </summary>
+    public static string ConditionSummary(IEnumerable<SkillCondition>? conditions, SheetTemplate? template)
+    {
+        if (conditions == null) return "";
+        var parts = new List<string>();
+        foreach (var c in conditions)
+        {
+            string field = template?.FindField(c.FieldId)?.Name ?? c.FieldId;
+            string op    = c.Op is >= 0 and <= ConditionOp.Greater ? CondOps[(int)c.Op] : "?";
+            string pct   = c.IsPercentage ? "%" : "";
+            parts.Add($"{field} {op} {c.Value:0.##}{pct}");
         }
         return string.Join(", ", parts);
     }

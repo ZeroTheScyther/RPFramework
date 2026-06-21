@@ -76,7 +76,7 @@ public sealed class BagItemWindow : Window, IDisposable
         ImGui.Separator();
 
         using (var grid = ImRaii.Child("##rpbaggrid", new Vector2(-1, -1), false))
-            if (grid) _grid.DrawGrid(bag, _path, items, allBags, code);
+            if (grid) _grid.DrawGrid(bag, _path, items, allBags, code, bagItem.Capacity);
 
         _grid.DrawModals();
     }

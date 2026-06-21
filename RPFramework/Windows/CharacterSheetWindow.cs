@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
 using System.Text.Json;
@@ -41,13 +42,20 @@ public class CharacterSheetWindow : Window, IDisposable
     public void Dispose() { }
 
     /// <summary>Opens the window straight into the template editor for a campaign (DM entry from the Hub).</summary>
+    /// <summary>DM entry from the Hub: switch campaign, enter template-edit mode, and open the unified window.</summary>
     public void OpenTemplateEditor(string code)
     {
         _plugin.SetActiveCampaign(code);
+        EnterTemplateEditor(code);
+        _plugin.RpCharacterWindow.IsOpen = true;
+    }
+
+    /// <summary>Enters template-edit mode without opening this (headless) window — the editor renders inside RpCharacterWindow.</summary>
+    internal void EnterTemplateEditor(string code)
+    {
         _draft     = CloneTemplate(_plugin.Store.TemplateOrDefault(code));
         _draftCode = code;
         _editMode  = true;
-        IsOpen     = true;
     }
 
     public override void Draw()
@@ -62,28 +70,24 @@ public class CharacterSheetWindow : Window, IDisposable
         DrawCampaignSelector(code);
         ImGui.Separator();
 
+        // The live UI is RpCharacterWindow (which calls DrawProfile/DrawStats/DrawTemplateEditor
+        // directly); this standalone window is kept only as the logic host. If opened on its own it
+        // falls back to the stats view.
         if (_editMode && _draft != null && _draftCode == code)
             DrawTemplateEditor(code);
         else
-            DrawSheet(code);
+            DrawStats(code);
     }
 
-    private void DrawCampaignSelector(string code)
+    /// <summary>True when the DM is editing this campaign's template (the Sheet tab shows the editor).</summary>
+    internal bool IsEditingTemplate(string code) => _editMode && _draft != null && _draftCode == code;
+
+    internal void DrawCampaignSelector(string code)
     {
         var parties = _plugin.Store.Parties.ToList();
         var party   = _plugin.Store.Party(code);
 
-        bool isDm = _plugin.IsDm(code) && party is { IsPersonal: false };
-        if (isDm)
-        {
-            ImGui.AlignTextToFramePadding();
-            using (ImRaii.PushFont(Plugin.PluginInterface.UiBuilder.IconFontFixedWidthHandle.Lock().ImFont))
-                ImGui.TextUnformatted(FontAwesomeIcon.PencilAlt.ToIconString());
-            if (ImGui.IsItemClicked()) { _draft = CloneTemplate(_plugin.Store.TemplateOrDefault(code)); _draftCode = code; _editMode = true; }
-            if (ImGui.IsItemHovered()) ImGui.SetTooltip("Edit sheet template (DM)");
-            ImGui.SameLine();
-        }
-
+        // The DM template-edit entry now lives as a title-bar cog button on RpCharacterWindow.
         ImGui.SetNextItemWidth(-1);
         string preview = party?.Name ?? code;
         if (ImGui.BeginCombo("##campaignsel", preview))
@@ -100,7 +104,13 @@ public class CharacterSheetWindow : Window, IDisposable
 
     // ── Sheet ───────────────────────────────────────────────────────────────────
 
-    private void DrawSheet(string code)
+    /// <summary>A group is "profile" content when every field is free-form Text (Name/Race/Job,
+    /// Personality, Background, …); those render on the Profile tab. Everything else is the Stats tab.</summary>
+    private static bool IsProfileGroup(SheetGroup g) => g.Fields.Count > 0 && g.Fields.All(f => f.Type == FieldType.Text);
+
+    /// <summary>The Stats tab: pools, stats, specializations — every non-Text group. Always editable.
+    /// The final group fills the leftover height so long lists (e.g. Specializations) don't cut off.</summary>
+    internal void DrawStats(string code)
     {
         var template = _plugin.Store.TemplateOrDefault(code);
         var ch       = _plugin.Store.Character(code, _plugin.LocalPlayerId!);
@@ -108,21 +118,101 @@ public class CharacterSheetWindow : Window, IDisposable
         var   st    = ch.State;
         float scale = ImGuiHelpers.GlobalScale;
 
-        using var scroll = ImRaii.Child("##sheetscroll", new Vector2(-1, -1), false, ImGuiWindowFlags.HorizontalScrollbar);
+        using var scroll = ImRaii.Child("##sheet_stats", new Vector2(-1, -1), false, ImGuiWindowFlags.HorizontalScrollbar);
         if (!scroll) return;
 
-        foreach (var group in template.Groups)
+        var groups = template.Groups.Where(g => !IsProfileGroup(g)).ToList();
+        for (int i = 0; i < groups.Count; i++)
         {
-            DrawGroup(group, st, template, code, scale);
-            ImGuiHelpers.ScaledDummy(4f);
+            bool last = i == groups.Count - 1;
+            DrawGroup(groups[i], st, template, code, scale, fillLast: last);
+            if (!last) ImGuiHelpers.ScaledDummy(4f);
         }
     }
 
-    private void DrawGroup(SheetGroup group, CharacterState st, SheetTemplate template, string code, float scale)
+    // Profile / section styling.
+    private static readonly Vector4 Accent     = new(0.55f, 0.78f, 1.00f, 1f); // section headers + accent stripe
+    private static readonly Vector4 LabelMuted = new(0.60f, 0.64f, 0.72f, 1f); // field labels
+    private static readonly Vector4 EmptyMuted = new(0.45f, 0.45f, 0.50f, 1f); // unset values
+
+    /// <summary>A styled section header: a faint accent-tinted bar with a left accent stripe and the
+    /// group name in the accent colour. Shared by the Stats groups and the Profile sections.</summary>
+    private static void DrawSectionHeader(string name, float scale)
     {
-        ImGui.TextUnformatted(group.Name);
-        ImGui.Separator();
-        ImGuiHelpers.ScaledDummy(2f);
+        var   dl   = ImGui.GetWindowDrawList();
+        var   p0   = ImGui.GetCursorScreenPos();
+        float w    = ImGui.GetContentRegionAvail().X;
+        float padY = 4f * scale;
+        float h    = ImGui.GetTextLineHeight() + padY * 2;
+
+        dl.AddRectFilled(p0, p0 + new Vector2(w, h),        ImGui.ColorConvertFloat4ToU32(new Vector4(Accent.X, Accent.Y, Accent.Z, 0.10f)), 4f * scale);
+        dl.AddRectFilled(p0, p0 + new Vector2(3f * scale, h), ImGui.ColorConvertFloat4ToU32(Accent), 4f * scale);
+        dl.AddText(p0 + new Vector2(10f * scale, padY), ImGui.ColorConvertFloat4ToU32(Accent), name);
+        ImGui.Dummy(new Vector2(w, h));
+        ImGuiHelpers.ScaledDummy(3f);
+    }
+
+    /// <summary>The Profile tab: the free-form Text groups. Read-only by default (like viewing another
+    /// player); the title-bar pen toggles <paramref name="editable"/> so the owner can edit their fluff.</summary>
+    internal void DrawProfile(string code, bool editable)
+    {
+        var template = _plugin.Store.TemplateOrDefault(code);
+        var ch       = _plugin.Store.Character(code, _plugin.LocalPlayerId!);
+        if (ch == null) { ImGui.TextDisabled("No character in this campaign yet."); return; }
+        var   st    = ch.State;
+        float scale = ImGuiHelpers.GlobalScale;
+
+        if (editable) ImGui.TextColored(new Vector4(1f, 0.8f, 0.3f, 1f), "Editing - click the pen again when done.");
+
+        using var scroll = ImRaii.Child("##sheet_profile", new Vector2(-1, -1), false, ImGuiWindowFlags.HorizontalScrollbar);
+        if (!scroll) return;
+
+        foreach (var group in template.Groups.Where(IsProfileGroup))
+        {
+            DrawSectionHeader(group.Name, scale);
+            using (ImRaii.PushIndent(8f * scale, false))
+            {
+                foreach (var f in group.Fields)
+                {
+                    if (editable) DrawTextField(f, st, code, scale);
+                    else          DrawProfileValue(f, st, scale);
+                    ImGuiHelpers.ScaledDummy(3f);
+                }
+            }
+            ImGuiHelpers.ScaledDummy(8f);
+        }
+    }
+
+    /// <summary>Read-only label/value for a profile Text field: muted label, bright value. Single-line
+    /// fields (Name/Race/Job) align inline; multiline notes stack the value beneath the label.</summary>
+    private void DrawProfileValue(SheetField f, CharacterState st, float scale)
+    {
+        st.TextValues.TryGetValue(f.Id, out string? val);
+        bool empty = string.IsNullOrWhiteSpace(val);
+
+        if (!f.Multiline)
+        {
+            ImGui.TextColored(LabelMuted, f.Name); MaybeTooltip(f);
+            ImGui.SameLine(118f * scale);
+            if (empty) ImGui.TextColored(EmptyMuted, "Not set");
+            else       ImGui.TextUnformatted(val);
+        }
+        else
+        {
+            ImGui.TextColored(LabelMuted, f.Name); MaybeTooltip(f);
+            if (empty) ImGui.TextColored(EmptyMuted, "Not set");
+            else
+            {
+                ImGui.PushTextWrapPos(ImGui.GetContentRegionAvail().X);
+                ImGui.TextUnformatted(val);
+                ImGui.PopTextWrapPos();
+            }
+        }
+    }
+
+    private void DrawGroup(SheetGroup group, CharacterState st, SheetTemplate template, string code, float scale, bool fillLast = false)
+    {
+        DrawSectionHeader(group.Name, scale);
 
         var bars    = group.Fields.Where(f => f.Type == FieldType.Bar).ToList();
         var dots    = group.Fields.Where(f => f.Type == FieldType.Dot).ToList();
@@ -147,12 +237,12 @@ public class CharacterSheetWindow : Window, IDisposable
             {
                 ImGui.TableSetupColumn("##sl1", ImGuiTableColumnFlags.WidthFixed, 36 * scale);
                 ImGui.TableSetupColumn("##sv1", ImGuiTableColumnFlags.WidthFixed, 52 * scale);
-                ImGui.TableSetupColumn("##sm1", ImGuiTableColumnFlags.WidthFixed, 34 * scale);
+                ImGui.TableSetupColumn("##sm1", ImGuiTableColumnFlags.WidthFixed, 58 * scale);
                 ImGui.TableSetupColumn("##sl2", ImGuiTableColumnFlags.WidthFixed, 36 * scale);
                 ImGui.TableSetupColumn("##sv2", ImGuiTableColumnFlags.WidthFixed, 52 * scale);
-                ImGui.TableSetupColumn("##sm2", ImGuiTableColumnFlags.WidthFixed, 34 * scale);
+                ImGui.TableSetupColumn("##sm2", ImGuiTableColumnFlags.WidthFixed, 58 * scale);
                 for (int i = 0; i < numbers.Count; i += 2)
-                    DrawNumberRow(numbers[i], i + 1 < numbers.Count ? numbers[i + 1] : null, st, code, scale);
+                    DrawNumberRow(numbers[i], i + 1 < numbers.Count ? numbers[i + 1] : null, st, code, template, scale);
                 ImGui.EndTable();
             }
         }
@@ -160,14 +250,26 @@ public class CharacterSheetWindow : Window, IDisposable
         if (checks.Count > 0)
         {
             if (bars.Count > 0 || dots.Count > 0 || numbers.Count > 0) ImGui.Spacing();
-            using var child = ImRaii.Child($"##checks_{group.Id}", new Vector2(-1, checks.Count <= 12 ? 0 : 150 * scale), false);
+            // The last group on a tab fills the leftover height so a long checkbox list scrolls cleanly
+            // instead of being boxed into a stub. Otherwise: auto-size when short, capped scroll when long.
+            float checksH = fillLast ? -1 : (checks.Count <= 12 ? 0 : 150 * scale);
+            using var child = ImRaii.Child($"##checks_{group.Id}", new Vector2(-1, checksH), false);
             foreach (var f in checks)
             {
-                st.CheckValues.TryGetValue(f.Id, out bool val);
-                bool v = val;
-                if (ImGui.Checkbox($"{f.Name}##ck_{f.Id}", ref v))
-                    _ = _plugin.Network.CharacterEditCheck(code, f.Id, v);
-                MaybeTooltip(f);
+                st.CheckValues.TryGetValue(f.Id, out bool baseVal);
+                var  sources    = StatMath.CheckSources(st, f.Id, template);
+                bool eff        = sources.Count > 0 ? sources[^1].Grant : baseVal;
+                bool overridden = sources.Count > 0 && eff != baseVal;
+
+                // The box shows the EFFECTIVE state; a click still toggles the player's own base value
+                // (a gear/spell override keeps the box forced until that source is removed).
+                bool v = eff;
+                using (ImRaii.PushColor(ImGuiCol.Text, StatModified, overridden))
+                    if (ImGui.Checkbox($"{f.Name}##ck_{f.Id}", ref v))
+                        _ = _plugin.Network.CharacterEditCheck(code, f.Id, !baseVal);
+
+                if (sources.Count > 0 && ImGui.IsItemHovered()) DrawCheckBreakdown(baseVal, sources);
+                else MaybeTooltip(f);
             }
         }
 
@@ -198,15 +300,7 @@ public class CharacterSheetWindow : Window, IDisposable
         st.StatValues.TryGetValue(curKey, out int cur);
         st.StatValues.TryGetValue(maxKey, out int max);
 
-        int bonus = 0; string bonusLabel = "";
-        if (f.BonusSourceFieldId != null)
-        {
-            var bonusField = template.FindField(f.BonusSourceFieldId);
-            if (bonusField != null && st.StatValues.TryGetValue(f.BonusSourceFieldId, out int bonusSrc))
-            { bonus = StatMath.StatMod(bonusSrc); bonusLabel = bonusField.Name; }
-        }
-
-        int   effectiveMax = max + bonus;
+        int   effectiveMax = StatMath.EffectiveBarMax(st, f, template); // stored max + stat bonus + equipped gear
         float fraction     = effectiveMax > 0 ? Math.Clamp((float)cur / effectiveMax, 0f, 1f) : 0f;
         var   color        = f.IsHpBar ? new Vector4(0.20f, 0.70f, 0.20f, 1f)
                            : f.IsApBar ? new Vector4(0.20f, 0.50f, 0.90f, 1f)
@@ -220,46 +314,123 @@ public class CharacterSheetWindow : Window, IDisposable
 
         float fieldW = 60 * scale;
         ImGui.SetNextItemWidth(fieldW);
-        if (ImGui.InputInt($"##rc_{f.Id}", ref cur, 0, 0, default, ImGuiInputTextFlags.EnterReturnsTrue))
+        ImGui.InputInt($"##rc_{f.Id}", ref cur, 0, 0);
+        if (ImGui.IsItemDeactivatedAfterEdit())
             _ = _plugin.Network.CharacterEditStat(code, curKey, Math.Clamp(cur, 0, effectiveMax));
         ImGui.SameLine(); ImGui.TextUnformatted("/"); ImGui.SameLine();
         ImGui.SetNextItemWidth(fieldW);
-        if (ImGui.InputInt($"##rm_{f.Id}", ref max, 0, 0, default, ImGuiInputTextFlags.EnterReturnsTrue))
+        ImGui.InputInt($"##rm_{f.Id}", ref max, 0, 0);
+        bool maxHover = ImGui.IsItemHovered();
+        if (ImGui.IsItemDeactivatedAfterEdit())
             _ = _plugin.Network.CharacterEditStat(code, maxKey, Math.Clamp(max, 0, 9999));
-        if (bonus != 0 && bonusLabel.Length > 0)
+        if (maxHover) DrawBarMaxBreakdown(st, f, template);
+
+        // When gear/stat bonuses lift the cap above the stored max, show the effective max in orange
+        // (same language as a modified stat); the full per-source breakdown is on hover.
+        if (effectiveMax != max)
         {
-            ImGui.SameLine();
-            ImGui.TextDisabled(bonus > 0 ? $"(+{bonus} {bonusLabel})" : $"({bonus} {bonusLabel})");
+            ImGui.SameLine(0f, 4f * scale);
+            ImGui.TextColored(StatModified, $"({effectiveMax})");
+            if (ImGui.IsItemHovered()) DrawBarMaxBreakdown(st, f, template);
         }
     }
 
-    private void DrawNumberRow(SheetField f1, SheetField? f2, CharacterState st, string code, float scale)
+    /// Tooltip listing what raises a bar's max: stored base, each stat/gear source, effective max.
+    /// No-op when nothing lifts it.
+    internal static void DrawBarMaxBreakdown(CharacterState st, SheetField f, SheetTemplate template)
+    {
+        var sources = StatMath.BarMaxSources(st, f, template);
+        if (sources.Count == 0) return;
+
+        st.StatValues.TryGetValue(f.Id + ":max", out int storedMax);
+        ImGui.BeginTooltip();
+        ImGui.TextDisabled($"Base {storedMax}");
+        foreach (var (name, d) in sources)
+            ImGui.TextColored(d > 0 ? StatBuff : StatDebuff, $"[{name}] {(d > 0 ? "+" : "")}{d}");
+        ImGui.Separator();
+        ImGui.TextUnformatted($"Max {StatMath.EffectiveBarMax(st, f, template)}");
+        ImGui.EndTooltip();
+    }
+
+    private void DrawNumberRow(SheetField f1, SheetField? f2, CharacterState st, string code, SheetTemplate template, float scale)
     {
         ImGui.TableNextRow();
 
         st.StatValues.TryGetValue(f1.Id, out int v1);
         ImGui.TableSetColumnIndex(0); ImGui.TextUnformatted(f1.Name); MaybeTooltip(f1);
         ImGui.TableSetColumnIndex(1); ImGui.SetNextItemWidth(48 * scale);
-        if (ImGui.InputInt($"##rn_{f1.Id}", ref v1, 0, 0, default, ImGuiInputTextFlags.EnterReturnsTrue))
+        ImGui.InputInt($"##rn_{f1.Id}", ref v1, 0, 0);
+        bool h1 = ImGui.IsItemHovered();
+        if (ImGui.IsItemDeactivatedAfterEdit())
             _ = _plugin.Network.CharacterEditStat(code, f1.Id, Math.Clamp(v1, f1.Min, f1.Max));
-        if (f1.ShowModifier)
-        {
-            int m = StatMath.StatMod(v1);
-            ImGui.TableSetColumnIndex(2); ImGui.TextDisabled(m >= 0 ? $"+{m}" : $"{m}");
-        }
+        if (h1) DrawStatBreakdown(st, f1, v1, template);
+        if (f1.ShowModifier) { ImGui.TableSetColumnIndex(2); DrawModifier(st, f1, v1, template); }
 
         if (f2 == null) return;
 
         st.StatValues.TryGetValue(f2.Id, out int v2);
         ImGui.TableSetColumnIndex(3); ImGui.TextUnformatted(f2.Name); MaybeTooltip(f2);
         ImGui.TableSetColumnIndex(4); ImGui.SetNextItemWidth(48 * scale);
-        if (ImGui.InputInt($"##rn_{f2.Id}", ref v2, 0, 0, default, ImGuiInputTextFlags.EnterReturnsTrue))
+        ImGui.InputInt($"##rn_{f2.Id}", ref v2, 0, 0);
+        bool h2 = ImGui.IsItemHovered();
+        if (ImGui.IsItemDeactivatedAfterEdit())
             _ = _plugin.Network.CharacterEditStat(code, f2.Id, Math.Clamp(v2, f2.Min, f2.Max));
-        if (f2.ShowModifier)
+        if (h2) DrawStatBreakdown(st, f2, v2, template);
+        if (f2.ShowModifier) { ImGui.TableSetColumnIndex(5); DrawModifier(st, f2, v2, template); }
+    }
+
+    // Buff/debuff/override colors for stat math, shared by both sheets.
+    internal static readonly Vector4 StatModified = new(1f,    0.65f, 0.2f,  1f); // orange: overwritten by effects
+    private  static readonly Vector4 StatBuff     = new(0.45f, 0.85f, 0.45f, 1f);
+    private  static readonly Vector4 StatDebuff   = new(0.85f, 0.45f, 0.45f, 1f);
+
+    /// Renders a stat's roll contribution. When equipped gear / active passives change the stat, the
+    /// EFFECTIVE value is shown in orange (signalling the base is overwritten) followed by the D&D
+    /// roll modifier; otherwise just the modifier. Hover shows the per-source breakdown.
+    internal static void DrawModifier(CharacterState st, SheetField f, int raw, SheetTemplate template)
+    {
+        int eff = StatMath.EffectiveStat(st, f.Id, template);
+        int m   = StatMath.StatMod(eff);
+        if (eff != raw)
         {
-            int m = StatMath.StatMod(v2);
-            ImGui.TableSetColumnIndex(5); ImGui.TextDisabled(m >= 0 ? $"+{m}" : $"{m}");
+            ImGui.TextColored(StatModified, $"({eff})");
+            ImGui.SameLine(0f, 4f * ImGuiHelpers.GlobalScale);
+            ImGui.TextDisabled(m >= 0 ? $"+{m}" : $"{m}");
+            if (ImGui.IsItemHovered()) DrawStatBreakdown(st, f, raw, template);
         }
+        else
+        {
+            ImGui.TextDisabled(m >= 0 ? $"+{m}" : $"{m}");
+        }
+    }
+
+    /// Tooltip listing every source contributing to a stat: base value, each gear/skill delta, total.
+    /// No-op when nothing modifies the stat (so a plain hover over an unmodified field shows nothing).
+    internal static void DrawStatBreakdown(CharacterState st, SheetField f, int raw, SheetTemplate template)
+    {
+        var sources = StatMath.StatSources(st, f.Id, template);
+        if (sources.Count == 0) return;
+
+        ImGui.BeginTooltip();
+        ImGui.TextDisabled($"Base {raw}");
+        foreach (var (name, d) in sources)
+            ImGui.TextColored(d > 0 ? StatBuff : StatDebuff, $"[{name}] {(d > 0 ? "+" : "")}{d}");
+        ImGui.Separator();
+        int eff = StatMath.EffectiveStat(st, f.Id, template);
+        int m   = StatMath.StatMod(eff);
+        ImGui.TextUnformatted($"Total {eff} ({(m >= 0 ? "+" : "")}{m})");
+        ImGui.EndTooltip();
+    }
+
+    /// Tooltip for a checkbox/proficiency that gear or a spell is forcing on/off: shows the player's
+    /// own base setting and each source that grants or removes the proficiency.
+    internal static void DrawCheckBreakdown(bool baseVal, List<(string Name, bool Grant)> sources)
+    {
+        ImGui.BeginTooltip();
+        ImGui.TextDisabled(baseVal ? "Base: on" : "Base: off");
+        foreach (var (name, grant) in sources)
+            ImGui.TextColored(grant ? StatBuff : StatDebuff, $"[{name}] {(grant ? "grants" : "removes")}");
+        ImGui.EndTooltip();
     }
 
     private void DrawDotField(SheetField f, CharacterState st, string code, float scale)
@@ -298,7 +469,7 @@ public class CharacterSheetWindow : Window, IDisposable
 
     // ── Template editor (draft → publish) ────────────────────────────────────────
 
-    private void DrawTemplateEditor(string code)
+    internal void DrawTemplateEditor(string code)
     {
         float scale = ImGuiHelpers.GlobalScale;
         var   template = _draft!;

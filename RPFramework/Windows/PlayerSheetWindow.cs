@@ -105,13 +105,13 @@ public class PlayerSheetWindow : Window, IDisposable
             {
                 ImGui.TableSetupColumn("##sl1", ImGuiTableColumnFlags.WidthFixed, 36 * scale);
                 ImGui.TableSetupColumn("##sv1", ImGuiTableColumnFlags.WidthFixed, 52 * scale);
-                ImGui.TableSetupColumn("##sm1", ImGuiTableColumnFlags.WidthFixed, 34 * scale);
+                ImGui.TableSetupColumn("##sm1", ImGuiTableColumnFlags.WidthFixed, 58 * scale);
                 ImGui.TableSetupColumn("##sl2", ImGuiTableColumnFlags.WidthFixed, 36 * scale);
                 ImGui.TableSetupColumn("##sv2", ImGuiTableColumnFlags.WidthFixed, 52 * scale);
-                ImGui.TableSetupColumn("##sm2", ImGuiTableColumnFlags.WidthFixed, 34 * scale);
+                ImGui.TableSetupColumn("##sm2", ImGuiTableColumnFlags.WidthFixed, 58 * scale);
 
                 for (int i = 0; i < numbers.Count; i += 2)
-                    DrawNumberRow(numbers[i], i + 1 < numbers.Count ? numbers[i + 1] : null, p, scale);
+                    DrawNumberRow(numbers[i], i + 1 < numbers.Count ? numbers[i + 1] : null, p, template, scale);
 
                 ImGui.EndTable();
             }
@@ -124,11 +124,17 @@ public class PlayerSheetWindow : Window, IDisposable
                 new Vector2(-1, checks.Count <= 12 ? 0 : 150 * scale), false);
             foreach (var f in checks)
             {
-                p.CheckValues.TryGetValue(f.Id, out bool val);
-                bool v = val;
-                using var _ = ImRaii.Disabled();
-                ImGui.Checkbox($"{f.Name}##pck_{f.Id}", ref v);
-                MaybeTooltip(f);
+                p.CheckValues.TryGetValue(f.Id, out bool baseVal);
+                var  sources    = StatMath.CheckSources(p, f.Id, template);
+                bool eff        = sources.Count > 0 ? sources[^1].Grant : baseVal;
+                bool overridden = sources.Count > 0 && eff != baseVal;
+                bool v = eff;
+                using var _d = ImRaii.Disabled();
+                using (ImRaii.PushColor(ImGuiCol.Text, CharacterSheetWindow.StatModified, overridden))
+                    ImGui.Checkbox($"{f.Name}##pck_{f.Id}", ref v);
+                if (sources.Count > 0 && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+                    CharacterSheetWindow.DrawCheckBreakdown(baseVal, sources);
+                else MaybeTooltip(f);
             }
         }
 
@@ -197,21 +203,8 @@ public class PlayerSheetWindow : Window, IDisposable
     private static void DrawBarField(SheetField f, CharacterState p, SheetTemplate template, float scale)
     {
         p.StatValues.TryGetValue(f.Id + ":cur", out int cur);
-        p.StatValues.TryGetValue(f.Id + ":max", out int max);
 
-        int    bonus      = 0;
-        string bonusLabel = "";
-        if (f.BonusSourceFieldId != null)
-        {
-            var bonusField = template.FindField(f.BonusSourceFieldId);
-            if (bonusField != null && p.StatValues.TryGetValue(f.BonusSourceFieldId, out int bonusSrc))
-            {
-                bonus      = StatMath.StatMod(bonusSrc);
-                bonusLabel = bonusField.Name;
-            }
-        }
-
-        int   effectiveMax = max + bonus;
+        int   effectiveMax = StatMath.EffectiveBarMax(p, f, template); // stored max + stat bonus + equipped gear
         float fraction     = effectiveMax > 0 ? Math.Clamp((float)cur / effectiveMax, 0f, 1f) : 0f;
         var   color        = f.IsHpBar  ? new Vector4(0.20f, 0.70f, 0.20f, 1f)
                            : f.IsApBar ? new Vector4(0.20f, 0.50f, 0.90f, 1f)
@@ -223,38 +216,30 @@ public class PlayerSheetWindow : Window, IDisposable
         using (ImRaii.PushColor(ImGuiCol.PlotHistogram, color))
             ImGui.ProgressBar(fraction, new Vector2(-1, 14 * scale), "");
 
-        ImGui.TextDisabled($"{cur} / {effectiveMax}");
-        if (bonus != 0 && bonusLabel.Length > 0)
-        {
-            ImGui.SameLine();
-            ImGui.TextDisabled(bonus > 0 ? $"(+{bonus} {bonusLabel})" : $"({bonus} {bonusLabel})");
-        }
+        p.StatValues.TryGetValue(f.Id + ":max", out int storedMax);
+        bool lifted = effectiveMax != storedMax;
+        ImGui.TextDisabled($"{cur} / "); ImGui.SameLine(0f, 0f);
+        if (lifted) ImGui.TextColored(CharacterSheetWindow.StatModified, $"{effectiveMax}");
+        else        ImGui.TextDisabled($"{effectiveMax}");
+        if (lifted && ImGui.IsItemHovered()) CharacterSheetWindow.DrawBarMaxBreakdown(p, f, template);
     }
 
-    private static void DrawNumberRow(SheetField f1, SheetField? f2, CharacterState p, float scale)
+    private static void DrawNumberRow(SheetField f1, SheetField? f2, CharacterState p, SheetTemplate template, float scale)
     {
         ImGui.TableNextRow();
 
         p.StatValues.TryGetValue(f1.Id, out int v1);
         ImGui.TableSetColumnIndex(0); ImGui.TextUnformatted(f1.Name); MaybeTooltip(f1);
         ImGui.TableSetColumnIndex(1); ImGui.TextUnformatted($"{v1}");
-        if (f1.ShowModifier)
-        {
-            int m = StatMath.StatMod(v1);
-            ImGui.TableSetColumnIndex(2);
-            ImGui.TextDisabled(m >= 0 ? $"+{m}" : $"{m}");
-        }
+        if (ImGui.IsItemHovered()) CharacterSheetWindow.DrawStatBreakdown(p, f1, v1, template);
+        if (f1.ShowModifier) { ImGui.TableSetColumnIndex(2); CharacterSheetWindow.DrawModifier(p, f1, v1, template); }
 
         if (f2 == null) return;
 
         p.StatValues.TryGetValue(f2.Id, out int v2);
         ImGui.TableSetColumnIndex(3); ImGui.TextUnformatted(f2.Name); MaybeTooltip(f2);
         ImGui.TableSetColumnIndex(4); ImGui.TextUnformatted($"{v2}");
-        if (f2.ShowModifier)
-        {
-            int m = StatMath.StatMod(v2);
-            ImGui.TableSetColumnIndex(5);
-            ImGui.TextDisabled(m >= 0 ? $"+{m}" : $"{m}");
-        }
+        if (ImGui.IsItemHovered()) CharacterSheetWindow.DrawStatBreakdown(p, f2, v2, template);
+        if (f2.ShowModifier) { ImGui.TableSetColumnIndex(5); CharacterSheetWindow.DrawModifier(p, f2, v2, template); }
     }
 }

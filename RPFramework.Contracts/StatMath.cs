@@ -11,6 +11,15 @@ public static class StatMath
     /// D&D-style stat modifier: floor((stat − 10) / 2).
     public static int StatMod(int stat) => (int)Math.Floor((stat - 10) / 2.0);
 
+    /// Suffix that marks an effect targeting a bar's MAXIMUM rather than its current value. A bare bar
+    /// id (e.g. "builtin:hp") addresses current HP; "builtin:hp:max" addresses max HP. Equipment folds
+    /// only ":max" effects into the cap; skills/consumables apply bare effects to current.
+    public const string MaxSuffix = ":max";
+
+    /// Splits a bar-effect target id into its underlying field id and whether it addresses the max.
+    public static (string BaseId, bool TargetMax) SplitBarTarget(string fieldId)
+        => fieldId.EndsWith(MaxSuffix) ? (fieldId[..^MaxSuffix.Length], true) : (fieldId, false);
+
     // ── AP exhaustion penalty ─────────────────────────────────────────────────
 
     /// AP exhaustion penalty applied to ALL stat rolls.
@@ -66,12 +75,80 @@ public static class StatMath
             total += FieldDelta(skill.Effects, fieldId, cur);
         }
 
-        // Equipped gear contributes always-on passive adjustments.
+        // Equipped gear contributes passive adjustments while its conditions (if any) hold.
         foreach (var item in ch.Equipment.Values)
-            if (item.Effects != null)
+            if (item.Effects != null && ItemActive(item, ch, template))
                 total += FieldDelta(item.Effects, fieldId, cur);
 
         return total;
+    }
+
+    /// Per-source breakdown of the passive/gear adjustments to a field, in the same order they are
+    /// summed by <see cref="PassiveStatAdjust"/> (active skills first, then equipped gear). Each entry
+    /// is the source's display name and its net delta; zero-delta sources are omitted. Used to build
+    /// the "where did this come from" tooltip on a modified stat.
+    public static List<(string Name, int Delta)> StatSources(CharacterState ch, string fieldId, SheetTemplate template)
+    {
+        ch.StatValues.TryGetValue(fieldId, out int cur);
+        var list = new List<(string, int)>();
+
+        foreach (var skill in ch.Skills)
+        {
+            bool condActive = skill.Type == SkillType.Passive
+                              && skill.Conditions.Count > 0
+                              && ConditionsMet(skill, ch, template);
+            bool durActive  = skill.DurationRemaining > 0;
+            if (!condActive && !durActive) continue;
+            int d = FieldDelta(skill.Effects, fieldId, cur);
+            if (d != 0) list.Add((skill.Name, d));
+        }
+
+        foreach (var item in ch.Equipment.Values)
+            if (item.Effects != null && ItemActive(item, ch, template))
+            {
+                int d = FieldDelta(item.Effects, fieldId, cur);
+                if (d != 0) list.Add((item.Name, d));
+            }
+
+        return list;
+    }
+
+    /// Active Set-effects on a Checkbox (proficiency/specialization) field from gear and active
+    /// passives, in apply order (skills first, then gear). Each entry is the source's name and whether
+    /// it grants (true) or removes (false) the proficiency. Empty when nothing overrides the field.
+    public static List<(string Name, bool Grant)> CheckSources(CharacterState ch, string fieldId, SheetTemplate template)
+    {
+        var list = new List<(string, bool)>();
+
+        foreach (var skill in ch.Skills)
+        {
+            bool condActive = skill.Type == SkillType.Passive
+                              && skill.Conditions.Count > 0
+                              && ConditionsMet(skill, ch, template);
+            bool durActive  = skill.DurationRemaining > 0;
+            if (!condActive && !durActive) continue;
+            foreach (var fx in skill.Effects)
+                if (fx.FieldId == fieldId && fx.Op == EffectOp.Set)
+                    list.Add((skill.Name, fx.Value >= 1f));
+        }
+
+        foreach (var item in ch.Equipment.Values)
+            if (item.Effects != null && ItemActive(item, ch, template))
+                foreach (var fx in item.Effects)
+                    if (fx.FieldId == fieldId && fx.Op == EffectOp.Set)
+                        list.Add((item.Name, fx.Value >= 1f));
+
+        return list;
+    }
+
+    /// Effective on/off state of a Checkbox field: the stored base value unless an active gear/passive
+    /// source overrides it, in which case the last-applied Set wins (gear over skills).
+    public static bool EffectiveCheck(CharacterState ch, string fieldId, SheetTemplate template)
+    {
+        var sources = CheckSources(ch, fieldId, template);
+        if (sources.Count > 0) return sources[^1].Grant;
+        ch.CheckValues.TryGetValue(fieldId, out bool baseVal);
+        return baseVal;
     }
 
     /// Additive accumulator (applied before StatMod) of a set of effects targeting one field.
@@ -108,19 +185,56 @@ public static class StatMath
             bonus = StatMod(src);
         int gear = 0;
         foreach (var item in ch.Equipment.Values)
-            if (item.Effects != null)
-                gear += FieldDelta(item.Effects, bar.Id, storedMax);
+            if (item.Effects != null && ItemActive(item, ch, template))
+                gear += FieldDelta(item.Effects, bar.Id + MaxSuffix, storedMax);
         return storedMax + bonus + gear;
+    }
+
+    /// Per-source breakdown of everything that lifts a bar's max above its stored value: the stat
+    /// bonus from its BonusSourceFieldId (named after that stat) first, then each equipped-gear delta.
+    /// Mirrors the additions in <see cref="EffectiveBarMax"/>; zero-delta sources are omitted.
+    public static List<(string Name, int Delta)> BarMaxSources(CharacterState ch, SheetField bar, SheetTemplate template)
+    {
+        var list = new List<(string, int)>();
+        ch.StatValues.TryGetValue(bar.Id + ":max", out int storedMax);
+
+        if (bar.BonusSourceFieldId != null)
+        {
+            var bf = template.FindField(bar.BonusSourceFieldId);
+            if (bf != null && ch.StatValues.TryGetValue(bar.BonusSourceFieldId, out int src))
+            {
+                int b = StatMod(src);
+                if (b != 0) list.Add((bf.Name, b));
+            }
+        }
+
+        foreach (var item in ch.Equipment.Values)
+            if (item.Effects != null && ItemActive(item, ch, template))
+            {
+                int d = FieldDelta(item.Effects, bar.Id + MaxSuffix, storedMax);
+                if (d != 0) list.Add((item.Name, d));
+            }
+
+        return list;
     }
 
     // ── Condition evaluation ──────────────────────────────────────────────────
 
     public static bool ConditionsMet(RpSkill skill, CharacterState ch, SheetTemplate template)
+        => ConditionsMet(skill.Conditions, ch, template);
+
+    /// True when every condition in the set holds (an empty set is vacuously true).
+    public static bool ConditionsMet(IEnumerable<SkillCondition> conditions, CharacterState ch, SheetTemplate template)
     {
-        foreach (var c in skill.Conditions)
+        foreach (var c in conditions)
             if (!EvalCondition(c, ch, template)) return false;
         return true;
     }
+
+    /// Whether an equipped item's effects currently apply: an item with no conditions is always-on;
+    /// a conditional item contributes only while ALL of its conditions hold (same gate as a passive).
+    public static bool ItemActive(RpItemDto item, CharacterState ch, SheetTemplate template)
+        => item.Conditions == null || item.Conditions.Count == 0 || ConditionsMet(item.Conditions, ch, template);
 
     static bool EvalCondition(SkillCondition c, CharacterState ch, SheetTemplate template)
     {
@@ -151,14 +265,15 @@ public static class StatMath
 
         foreach (var fx in skill.Effects)
         {
-            string fid    = fx.FieldId;
-            var    field  = template.FindField(fid);
-            bool   isHpAp = (hpBar != null && fid == hpBar.Id)
-                         || (apBar != null && fid == apBar.Id);
+            var (baseId, targetMax) = SplitBarTarget(fx.FieldId);
+            var    field  = template.FindField(baseId);
+            bool   isHpAp = (hpBar != null && baseId == hpBar.Id)
+                         || (apBar != null && baseId == apBar.Id);
 
-            if (timed && !isHpAp) continue;
+            // Timed skills only tick current HP/AP; everything else (incl. any max change) is permanent.
+            if (timed && !(isHpAp && !targetMax)) continue;
 
-            var (_, maxVal) = GetFieldValues(fid, ch, template);
+            var (_, maxVal) = GetFieldValues(baseId, ch, template);
 
             if (field == null) continue;
 
@@ -166,21 +281,24 @@ public static class StatMath
             {
                 case FieldType.Bar:
                 {
-                    string curKey = fid + ":cur";
-                    string maxKey = fid + ":max";
-                    ch.StatValues.TryGetValue(maxKey, out int barMax);
-                    int bonus = 0;
-                    if (field.BonusSourceFieldId != null &&
-                        ch.StatValues.TryGetValue(field.BonusSourceFieldId, out int bonusSrc))
-                        bonus = StatMod(bonusSrc);
-                    int effMax = barMax + bonus;
-                    ch.StatValues.TryGetValue(curKey, out int curVal);
-                    ch.StatValues[curKey] = Math.Clamp(ApplyOp(fx, curVal, maxVal), 0, effMax);
+                    if (targetMax)
+                    {
+                        string maxKey = baseId + ":max";
+                        ch.StatValues.TryGetValue(maxKey, out int curMax);
+                        ch.StatValues[maxKey] = Math.Clamp(ApplyOp(fx, curMax, maxVal), 0, 9999);
+                    }
+                    else
+                    {
+                        string curKey = baseId + ":cur";
+                        int    effMax = EffectiveBarMax(ch, field, template); // stored max + stat bonus + equipped gear
+                        ch.StatValues.TryGetValue(curKey, out int curVal);
+                        ch.StatValues[curKey] = Math.Clamp(ApplyOp(fx, curVal, maxVal), 0, effMax);
+                    }
                     break;
                 }
                 case FieldType.Dot:
                 {
-                    string curKey = fid + ":cur";
+                    string curKey = baseId + ":cur";
                     int    dotMax = field.Max > 0 ? field.Max : 5;
                     ch.StatValues.TryGetValue(curKey, out int curVal);
                     ch.StatValues[curKey] = Math.Clamp(ApplyOp(fx, curVal, maxVal), 0, dotMax);
@@ -188,13 +306,13 @@ public static class StatMath
                 }
                 case FieldType.Number:
                 {
-                    ch.StatValues.TryGetValue(fid, out int numVal);
-                    ch.StatValues[fid] = ApplyOp(fx, numVal, maxVal);
+                    ch.StatValues.TryGetValue(baseId, out int numVal);
+                    ch.StatValues[baseId] = ApplyOp(fx, numVal, maxVal);
                     break;
                 }
                 case FieldType.Checkbox:
                     if (fx.Op == EffectOp.Set)
-                        ch.CheckValues[fid] = fx.Value >= 1f;
+                        ch.CheckValues[baseId] = fx.Value >= 1f;
                     break;
             }
         }
