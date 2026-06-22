@@ -7,90 +7,84 @@ using RPFramework.Contracts;
 namespace RPFramework.Windows;
 
 /// <summary>
-/// Shared editor for a single <see cref="SkillCondition"/> row, used by both the skill editor and the
-/// item-effects editor. Mirrors <see cref="EffectEditor"/>: the caller owns the table, the per-row
-/// <c>PushID</c>, <c>TableNextRow</c>, and the trailing delete column; this fills the Field / Op /
-/// Value / % cells (columns 0-3) and returns true if the condition changed this frame.
+/// Shared editor for a single <see cref="SkillCondition"/> row. Mirrors <see cref="EffectEditor"/>'s
+/// Category / Field / Op / Value / % layout: Stats test a numeric comparison, Specializations test a
+/// plain is true/false. The "On Turn End" trigger is no longer a condition — it is a block-level Trigger
+/// selector (see <see cref="BlockListEditor"/>). The caller owns the table, the per-row <c>PushID</c>,
+/// <c>TableNextRow</c>, and the trailing delete column.
 /// </summary>
 public static class ConditionEditor
 {
     private static readonly string[] OpNames = { "<", "≤", "=", "≥", ">" }; // matches ConditionOp order
 
-    /// <summary>Synthetic "On Turn End" target (an event marker, not a state predicate).</summary>
-    private static SheetField TurnEndTarget() => new()
-    {
-        Id   = StatMath.OnTurnEndId,
-        Name = "On Turn End",
-        Type = FieldType.Number,
-    };
+    /// <summary>Numeric condition targets: Number / Bar / Dot fields.</summary>
+    public static List<SheetField> StatFields(SheetTemplate template)
+        => template.Groups.SelectMany(g => g.Fields)
+                   .Where(f => f.Type is FieldType.Number or FieldType.Bar or FieldType.Dot).ToList();
 
-    /// <summary>
-    /// Fields a condition may test: numeric stats/pools plus proficiencies. When
-    /// <paramref name="includeTurnEnd"/> is set, the synthetic "On Turn End" trigger is offered too
-    /// (skill blocks only - it makes a block fire once per turn-end rather than continuously).
-    /// </summary>
-    public static List<SheetField> TargetFields(SheetTemplate template, bool includeTurnEnd = false)
+    /// <summary>Every field a condition may test (numeric + proficiencies) — flat list for summaries.</summary>
+    public static List<SheetField> TargetFields(SheetTemplate template)
     {
-        var list = template.Groups.SelectMany(g => g.Fields)
-                           .Where(f => f.Type is FieldType.Number or FieldType.Bar or FieldType.Dot or FieldType.Checkbox)
-                           .ToList();
-        if (includeTurnEnd) list.Add(TurnEndTarget());
+        var list = StatFields(template);
+        list.AddRange(EffectEditor.SpecFields(template));
         return list;
     }
 
-    public static bool DrawRow(SkillCondition c, List<SheetField> fields, string[] names)
+    /// <summary>A fresh condition targeting the first numeric field (used by "+ condition").</summary>
+    public static SkillCondition NewCondition(SheetTemplate template)
+        => new() { FieldId = StatFields(template).FirstOrDefault()?.Id ?? "" };
+
+    public static bool DrawRow(SkillCondition c, SheetTemplate template)
     {
         bool changed = false;
-        var  field   = fields.FirstOrDefault(f => f.Id == c.FieldId);
-        bool isCheck = field?.Type == FieldType.Checkbox;
-        bool isEvent = c.FieldId == StatMath.OnTurnEndId;
+        var  stats   = StatFields(template);
+        var  specs   = EffectEditor.SpecFields(template);
+        bool isSpec  = specs.Any(f => f.Id == c.FieldId);
 
+        // Column 0 — Category (Stat / Spec).
         ImGui.TableSetColumnIndex(0); ImGui.SetNextItemWidth(-1);
-        int fi = Math.Max(0, fields.FindIndex(f => f.Id == c.FieldId));
-        if (ImGui.Combo("##cfld", ref fi, names, names.Length))
+        int ci = isSpec ? 1 : 0;
+        if (ImGui.Combo("##ccat", ref ci, new[] { "Stat", "Spec." }, 2))
         {
-            var picked = fields[fi];
-            c.FieldId = picked.Id;
-            // Reset to sensible defaults so a proficiency reads "is true", not "< 50%".
-            if (picked.Type == FieldType.Checkbox)
-            { c.Op = ConditionOp.Equal; c.Value = 1f; c.IsPercentage = false; }
-            changed = true;
-            isCheck = picked.Type == FieldType.Checkbox;
-            isEvent = picked.Id == StatMath.OnTurnEndId;
+            bool wantSpec = ci == 1;
+            if (wantSpec != isSpec)
+            {
+                if (wantSpec) { c.FieldId = specs.FirstOrDefault()?.Id ?? ""; c.Op = ConditionOp.Equal; c.Value = 1f; c.IsPercentage = false; }
+                else          { c.FieldId = stats.FirstOrDefault()?.Id ?? ""; c.Op = ConditionOp.LessEqual; c.Value = 50f; c.IsPercentage = true; }
+                changed = true; isSpec = wantSpec;
+            }
         }
 
-        // "On Turn End" is a pure event marker: no operator, value, or percentage.
-        if (isEvent)
+        if (isSpec)
         {
-            ImGui.TableSetColumnIndex(1); ImGui.TextDisabled("(event)");
-            return changed;
-        }
-
-        if (isCheck)
-        {
-            // Proficiency test: a plain is true/false selector instead of a numeric comparison.
             if (c.Op != ConditionOp.Equal) { c.Op = ConditionOp.Equal; changed = true; }
             if (c.IsPercentage)            { c.IsPercentage = false;   changed = true; }
-            ImGui.TableSetColumnIndex(1); ImGui.TextDisabled("is");
-            ImGui.TableSetColumnIndex(2);
+            var names = specs.Select(f => f.Name).ToArray();
+            ImGui.TableSetColumnIndex(1); ImGui.SetNextItemWidth(-1);
+            int fi = Math.Max(0, specs.FindIndex(f => f.Id == c.FieldId));
+            if (names.Length > 0 && ImGui.Combo("##cspec", ref fi, names, names.Length)) { c.FieldId = specs[fi].Id; changed = true; }
+            ImGui.TableSetColumnIndex(2); ImGui.TextDisabled("is");
+            ImGui.TableSetColumnIndex(3);
             bool on = c.Value >= 1f;
             if (ImGui.Checkbox("##cbool", ref on)) { c.Value = on ? 1f : 0f; changed = true; }
-            ImGui.TableSetColumnIndex(3); // percentage N/A for a boolean
+            ImGui.TableSetColumnIndex(4);
             return changed;
         }
 
+        var statNames = stats.Select(f => f.Name).ToArray();
         ImGui.TableSetColumnIndex(1); ImGui.SetNextItemWidth(-1);
-        int opI = (int)c.Op;
-        if (ImGui.Combo("##cop", ref opI, OpNames, OpNames.Length)) { c.Op = (ConditionOp)opI; changed = true; }
+        int si = Math.Max(0, stats.FindIndex(f => f.Id == c.FieldId));
+        if (statNames.Length > 0 && ImGui.Combo("##cfld", ref si, statNames, statNames.Length)) { c.FieldId = stats[si].Id; changed = true; }
 
         ImGui.TableSetColumnIndex(2); ImGui.SetNextItemWidth(-1);
+        int opI = (int)c.Op;
+        if (ImGui.Combo("##cop", ref opI, OpNames, OpNames.Length)) { c.Op = (ConditionOp)opI; changed = true; }
+        ImGui.TableSetColumnIndex(3); ImGui.SetNextItemWidth(-1);
         float v = c.Value;
         if (ImGui.InputFloat("##cval", ref v, 0f, 0f, "%.0f")) { c.Value = v; changed = true; }
-
-        ImGui.TableSetColumnIndex(3);
+        ImGui.TableSetColumnIndex(4);
         bool p = c.IsPercentage;
         if (ImGui.Checkbox("##cpct", ref p)) { c.IsPercentage = p; changed = true; }
-
         return changed;
     }
 }

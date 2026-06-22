@@ -81,12 +81,14 @@ public static class StatMath
     /// conditions hold (empty conditions = always while engaged). With no conditional blocks this is
     /// identical to the pre-blocks behavior.
     /// </summary>
-    public static IEnumerable<SkillEffect> ActiveSkillEffects(RpSkill skill, CharacterState ch, SheetTemplate template)
+    public static IEnumerable<SkillEffect> ActiveSkillEffects(RpSkill skill, CharacterState ch, SheetTemplate template, bool forceActive = false)
     {
         bool dur     = skill.DurationRemaining > 0;
-        bool passive = skill.Type == SkillType.Passive;
+        // A passive contributes (live, non-destructively) only while toggled on, granted by equipment
+        // (forceActive), or running a timed grant (dur); conditions still gate it.
+        bool passive = skill.Type == SkillType.Passive && (skill.Active || forceActive);
 
-        if (dur || (passive && skill.Conditions.Count > 0 && ConditionsMet(skill.Conditions, ch, template)))
+        if (dur || (passive && ConditionsMet(skill.Conditions, ch, template)))
             foreach (var fx in skill.Effects) yield return fx;
 
         if (dur || passive)
@@ -116,18 +118,33 @@ public static class StatMath
 
     // ── Passive stat adjust ───────────────────────────────────────────────────
 
-    /// Sum of raw stat deltas from active passives + equipped gear for the given field ID.
+    /// <summary>
+    /// Every currently-active source of live effects with its display name, in apply order: the character's
+    /// own skills (active/timed/toggled passives) first, then each equipped item's own effects, then the
+    /// passives that item GRANTS its wearer (embedded definitions, forced on while the item is active). The
+    /// single place "what is contributing right now" is enumerated, so every consumer agrees.
+    /// </summary>
+    static IEnumerable<(string Name, IEnumerable<SkillEffect> Effects)> ActiveContributors(CharacterState ch, SheetTemplate template)
+    {
+        foreach (var skill in ch.Skills)
+            yield return (skill.Name, ActiveSkillEffects(skill, ch, template));
+
+        foreach (var item in ch.Equipment.Values)
+        {
+            yield return (item.Name, ActiveItemEffects(item, ch, template));
+            if (item.GrantedPassives is { Count: > 0 } && ItemActive(item, ch, template))
+                foreach (var gp in item.GrantedPassives)
+                    yield return (item.Name, ActiveSkillEffects(gp, ch, template, forceActive: true));
+        }
+    }
+
+    /// Sum of raw stat deltas from active passives + equipped gear (incl. item-granted passives) for a field.
     public static int PassiveStatAdjust(CharacterState ch, string fieldId, SheetTemplate template)
     {
         ch.StatValues.TryGetValue(fieldId, out int cur);
         int total = 0;
-
-        foreach (var skill in ch.Skills)
-            total += FieldDelta(ActiveSkillEffects(skill, ch, template), fieldId, cur);
-
-        foreach (var item in ch.Equipment.Values)
-            total += FieldDelta(ActiveItemEffects(item, ch, template), fieldId, cur);
-
+        foreach (var (_, fx) in ActiveContributors(ch, template))
+            total += FieldDelta(fx, fieldId, cur);
         return total;
     }
 
@@ -140,16 +157,10 @@ public static class StatMath
         ch.StatValues.TryGetValue(fieldId, out int cur);
         var list = new List<(string, int)>();
 
-        foreach (var skill in ch.Skills)
+        foreach (var (name, fx) in ActiveContributors(ch, template))
         {
-            int d = FieldDelta(ActiveSkillEffects(skill, ch, template), fieldId, cur);
-            if (d != 0) list.Add((skill.Name, d));
-        }
-
-        foreach (var item in ch.Equipment.Values)
-        {
-            int d = FieldDelta(ActiveItemEffects(item, ch, template), fieldId, cur);
-            if (d != 0) list.Add((item.Name, d));
+            int d = FieldDelta(fx, fieldId, cur);
+            if (d != 0) list.Add((name, d));
         }
 
         return list;
@@ -162,15 +173,10 @@ public static class StatMath
     {
         var list = new List<(string, bool)>();
 
-        foreach (var skill in ch.Skills)
-            foreach (var fx in ActiveSkillEffects(skill, ch, template))
-                if (fx.FieldId == fieldId && fx.Op == EffectOp.Set)
-                    list.Add((skill.Name, fx.Value >= 1f));
-
-        foreach (var item in ch.Equipment.Values)
-            foreach (var fx in ActiveItemEffects(item, ch, template))
-                if (fx.FieldId == fieldId && fx.Op == EffectOp.Set)
-                    list.Add((item.Name, fx.Value >= 1f));
+        foreach (var (name, fx) in ActiveContributors(ch, template))
+            foreach (var f in fx)
+                if (f.FieldId == fieldId && f.Op == EffectOp.Set)
+                    list.Add((name, f.Value >= 1f));
 
         return list;
     }
@@ -219,7 +225,12 @@ public static class StatMath
             bonus = StatMod(src);
         int gear = 0;
         foreach (var item in ch.Equipment.Values)
+        {
             gear += FieldDelta(ActiveItemEffects(item, ch, template), bar.Id + MaxSuffix, storedMax);
+            if (item.GrantedPassives is { Count: > 0 } && ItemActive(item, ch, template))
+                foreach (var gp in item.GrantedPassives)
+                    gear += FieldDelta(ActiveSkillEffects(gp, ch, template, forceActive: true), bar.Id + MaxSuffix, storedMax);
+        }
         return storedMax + bonus + gear;
     }
 
@@ -322,6 +333,9 @@ public static class StatMath
     /// </summary>
     public static bool ApplyTurnEndEffects(RpSkill skill, CharacterState ch, SheetTemplate template)
     {
+        // A passive contributes turn-end ticks only while engaged: toggled on or running a timed grant.
+        if (skill.Type == SkillType.Passive && !skill.Active && skill.DurationRemaining <= 0) return false;
+
         var toApply = new List<SkillEffect>();
 
         if (skill.TriggerOnTurnEnd && ConditionsMet(skill.Conditions, ch, template))
@@ -350,6 +364,10 @@ public static class StatMath
 
         foreach (var fx in effects)
         {
+            // Grant effect: switch the caster's own passive on for Value turns. Fires on activation
+            // regardless of the timed gate below (it is the discrete act of granting, not a stat tick).
+            if (fx.GrantPassiveId is Guid gid) { GrantPassive(ch, gid, (int)Math.Round(fx.Value)); continue; }
+
             var (baseId, targetMax) = SplitBarTarget(fx.FieldId);
             var    field  = template.FindField(baseId);
             bool   isHpAp = (hpBar != null && baseId == hpBar.Id)
@@ -401,6 +419,17 @@ public static class StatMath
                     break;
             }
         }
+    }
+
+    /// Switches a caster's own passive on for <paramref name="turns"/> turns (a timed grant): sets the
+    /// target passive's DurationRemaining so it contributes via the live mod layer and decays on turn end.
+    /// turns &lt;= 0 toggles it on indefinitely. No-op if no matching passive exists on the character.
+    static void GrantPassive(CharacterState ch, Guid id, int turns)
+    {
+        var target = ch.Skills.FirstOrDefault(s => s.Id == id && s.Type == SkillType.Passive);
+        if (target == null) return;
+        if (turns > 0) target.DurationRemaining = Math.Max(target.DurationRemaining, turns);
+        else           target.Active = true;
     }
 
     // ── Internal helpers ──────────────────────────────────────────────────────

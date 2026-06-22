@@ -71,14 +71,18 @@ public class BgmPlayerWindow : Window, IDisposable
             }
         }
 
-        if (_bgm.IsLoading) ImGui.TextDisabled($"Loading… {_bgm.DownloadProgress * 100:0}%");
+        if (room.Preparing)
+            ImGui.TextColored(new Vector4(0.4f, 0.85f, 1f, 1f), $"Waiting for members… {room.PrepareReady}/{room.PrepareTotal} ready");
+        else if (_bgm.IsLoading) ImGui.TextDisabled($"Loading… {_bgm.DownloadProgress * 100:0}%");
         else if (_bgm.LoadError != null) ImGui.TextColored(new Vector4(1f, 0.4f, 0.4f, 1f), _bgm.LoadError);
 
         using (ImRaii.Disabled(!control))
         {
             if (ImGui.Button("<<##prev")) bgm.Prev();
             ImGui.SameLine();
-            if (ImGui.Button(_bgm.IsPlaying ? "Pause##pp" : "Play##pp")) bgm.TogglePlayPause();
+            string ppLabel = room.Preparing ? "Preparing…##pp" : (room.IsPlaying ? "Pause##pp" : "Play##pp");
+            using (ImRaii.Disabled(room.Preparing))
+                if (ImGui.Button(ppLabel)) bgm.TogglePlayPause();
             ImGui.SameLine();
             if (ImGui.Button(">>##next")) bgm.Next();
             ImGui.SameLine();

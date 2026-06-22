@@ -64,10 +64,12 @@ public record DiceRollResultDto(
     string    Message       // pre-formatted human-readable summary
 );
 
-// ── Initiative ───────────────────────────────────────────────────────────────
+// ── Initiative encounters ──────────────────────────────────────────────────────
+// An encounter is a joinable combat room. A campaign may host several at once
+// (two separate fights => two independent trackers). Ephemeral and server-owned.
 
-public record InitiativeEntryDto(
-    string PlayerId,
+public record EncounterEntryDto(
+    string EntityId,        // PC playerId, companion/NPC GUID, or ad-hoc "npc:xxxx"
     string DisplayName,
     int    Roll,
     int    Bonus,
@@ -79,13 +81,14 @@ public record InitiativeEntryDto(
     bool   IsNpc
 );
 
-public record InitiativeStateDto(
-    string                   PartyCode,
-    List<InitiativeEntryDto> Order,
-    int                      CurrentIndex,
-    bool                     IsActive,
-    bool                     ShowHpAp,
-    long                     Version
+public record EncounterDto(
+    string                  CampaignCode,
+    string                  EncounterId,
+    string                  Name,
+    List<EncounterEntryDto> Order,
+    int                     CurrentIndex,
+    bool                    ShowHpAp,
+    long                    Version
 );
 
 // ── Inventory (personal + shared bags are unified) ───────────────────────────
@@ -101,7 +104,8 @@ public record RpItemDto(
     List<RpItemDto>?      Contents   = null,
     List<SkillEffect>?    Effects    = null,  // base-block stat effects for equippable/consumable items (null = none)
     List<SkillCondition>? Conditions = null,  // base-block gate: base Effects apply only while ALL are met (null/empty = always-on)
-    List<EffectBlock>?    Blocks     = null   // extra independent if-blocks (equipment), summed when their conditions hold
+    List<EffectBlock>?    Blocks     = null,  // extra independent if-blocks (equipment), summed when their conditions hold
+    List<RpSkill>?        GrantedPassives = null  // embedded passive definitions an equipped item grants its wearer (DM-authored vault passives travel with the item via trade)
 );
 
 public record BagDto(
@@ -152,10 +156,13 @@ public record RoomStateDto(
     List<RpSongDto>     Playlist,
     int                 CurrentIndex,
     bool                IsPlaying,
-    double              PositionSeconds,
-    long                ServerTimestamp,   // UTC ms — receivers adjust for transit latency
+    double              PositionSeconds,   // the LIVE playhead at send time; clients anchor it to their own clock and extrapolate
+    long                ServerTimestamp,   // UTC ms the snapshot was taken (advisory)
     LoopMode            Loop,
-    long                Version
+    long                Version,
+    bool                Preparing,         // true while the room is waiting for members to download+ready the cued song
+    int                 PrepareReady,      // members ready so far (only meaningful while Preparing)
+    int                 PrepareTotal       // active listeners we're waiting on (only meaningful while Preparing)
 );
 
 public record PlaybackCommandDto(
@@ -178,5 +185,5 @@ public record SnapshotDto(
     List<TemplateDto>        Templates,     // one per party
     List<BagDto>             Bags,          // owned + shared bags the player participates in
     List<RoomStateDto>       Rooms,         // rooms the player is a member of
-    List<InitiativeStateDto> Initiatives    // active combats in the player's parties
+    List<EncounterDto>       Encounters     // active combat encounters in the player's parties
 );

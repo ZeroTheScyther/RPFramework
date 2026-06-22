@@ -16,6 +16,14 @@ public static class ItemEffects
         var parts = new List<string>();
         foreach (var fx in effects)
         {
+            // Grant-passive effect: not a stat op (FieldId is empty).
+            if (fx.GrantPassiveId is not null)
+            {
+                int turns = (int)fx.Value;
+                parts.Add(turns > 0 ? $"Grants a passive for {turns}t" : "Grants a passive");
+                continue;
+            }
+
             var (baseId, targetMax) = StatMath.SplitBarTarget(fx.FieldId);
             var    sf    = template?.FindField(baseId);
             string field = sf == null ? fx.FieldId : targetMax ? "Max" + sf.Name : sf.Name;
@@ -42,6 +50,10 @@ public static class ItemEffects
         }
         return string.Join(", ", parts);
     }
+
+    /// <summary>"Rage, Guard" — the names of the passives an equipped item grants its wearer, or "".</summary>
+    public static string GrantedPassivesSummary(IEnumerable<RpSkill>? granted)
+        => granted == null ? "" : string.Join(", ", granted.Select(p => p.Name));
 
     private static readonly string[] CondOps = { "<", "<=", "=", ">=", ">" };
 

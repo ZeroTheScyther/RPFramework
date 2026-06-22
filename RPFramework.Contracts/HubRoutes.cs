@@ -37,16 +37,20 @@ public static class HubRoutes
         public const string EntityCreate = nameof(EntityCreate);
         public const string EntityDelete = nameof(EntityDelete);
         public const string EntityRename = nameof(EntityRename);
+        public const string EntityImport = nameof(EntityImport);   // import a companion from a base64 export code
 
         // Dice
         public const string RollDice = nameof(RollDice);
 
-        // Initiative
-        public const string InitiativeStart      = nameof(InitiativeStart);
-        public const string InitiativeEndTurn    = nameof(InitiativeEndTurn);
-        public const string InitiativeEndCombat  = nameof(InitiativeEndCombat);
-        public const string InitiativeAddNpc     = nameof(InitiativeAddNpc);
-        public const string InitiativeRemove     = nameof(InitiativeRemove);
+        // Initiative encounters (joinable, multiple per campaign)
+        public const string EncounterCreate    = nameof(EncounterCreate);
+        public const string EncounterDelete    = nameof(EncounterDelete);
+        public const string EncounterJoin      = nameof(EncounterJoin);
+        public const string EncounterLeave     = nameof(EncounterLeave);
+        public const string EncounterAddEntity = nameof(EncounterAddEntity);
+        public const string EncounterAddNpc    = nameof(EncounterAddNpc);
+        public const string EncounterRemove    = nameof(EncounterRemove);
+        public const string EncounterEndTurn   = nameof(EncounterEndTurn);
 
         // Inventory & trading
         public const string BagCreate        = nameof(BagCreate);
@@ -76,6 +80,9 @@ public static class HubRoutes
         public const string PlaylistAdd     = nameof(PlaylistAdd);
         public const string PlaylistRemove  = nameof(PlaylistRemove);
         public const string PlaybackCommand = nameof(PlaybackCommand);
+        public const string ResolveBgmAudio = nameof(ResolveBgmAudio); // (videoId) -> signed relative audio URL
+        public const string BgmReady        = nameof(BgmReady);        // (code, songIndex, version) — this client has the cued song ready
+        public const string BgmSetActive    = nameof(BgmSetActive);    // (code) — declare which room this connection is actively listening to ("" = none)
     }
 
     /// <summary>Server → client event names (used by HubConnection.On&lt;...&gt;).</summary>
@@ -88,8 +95,8 @@ public static class HubRoutes
         public const string CharacterRemoved    = nameof(CharacterRemoved);    // string code, string entityId
         public const string TemplateUpdated     = nameof(TemplateUpdated);     // TemplateDto
         public const string DiceRoll            = nameof(DiceRoll);            // DiceRollResultDto
-        public const string InitiativeUpdated   = nameof(InitiativeUpdated);   // InitiativeStateDto
-        public const string InitiativeEnded     = nameof(InitiativeEnded);     // string code
+        public const string EncounterUpdated    = nameof(EncounterUpdated);    // EncounterDto
+        public const string EncounterRemoved    = nameof(EncounterRemoved);    // string code, string encounterId
         public const string BagUpdated          = nameof(BagUpdated);          // BagDto
         public const string BagRemoved          = nameof(BagRemoved);          // Guid bagId
         public const string BagShareInvited     = nameof(BagShareInvited);     // BagShareInviteDto

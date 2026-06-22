@@ -2,12 +2,12 @@
 obj/
 bin/
 designDoc/
-RPFrameworkServer/
 release.sh
 .claude/
 depReps/
 *.user
 CLAUDE.md
+AGENTS.md
 .editorconfig
 .gitignore
 

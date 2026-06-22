@@ -35,6 +35,12 @@ public class RpCharacterWindow : Window, IDisposable
     private const  float  AnimFromScale = 0.82f;         // starts at 82% then eases out to 100%
     private        double _animElapsed = AnimDuration;   // start "done" so a window already open isn't animated
 
+    // The Skills tab needs more horizontal room (category/field/op/value columns), so the window widens
+    // by WidthBoost while it is selected and eases back on any other tab.
+    private const float WidthBoost     = 0.15f;          // +15% width on the Skills tab
+    private const float WidthAnimSpeed = 7f;             // per-second easing rate of the width transition
+    private       float _skillsWidthT;                   // 0 = normal width, 1 = fully widened
+
     public RpCharacterWindow(Plugin plugin)
         : base("RP Character##RPFramework.Character",
                ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse | ImGuiWindowFlags.NoResize)
@@ -84,11 +90,19 @@ public class RpCharacterWindow : Window, IDisposable
         }
 
         // Expand-out animation: ease the window from AnimFromScale up to full size over AnimDuration.
+        float dt = ImGui.GetIO().DeltaTime;
         if (_animElapsed < AnimDuration)
-            _animElapsed += ImGui.GetIO().DeltaTime;
+            _animElapsed += dt;
         float t     = Math.Clamp((float)(_animElapsed / AnimDuration), 0f, 1f);
         float eased = 1f - MathF.Pow(1f - t, 3f);                       // easeOutCubic
-        Size        = FullSize * (AnimFromScale + (1f - AnimFromScale) * eased);
+        float openScale = AnimFromScale + (1f - AnimFromScale) * eased;
+
+        // Ease the Skills-tab width boost toward its target (widen on Skills, restore elsewhere).
+        float target = _current == Tab.Skills ? 1f : 0f;
+        _skillsWidthT += (target - _skillsWidthT) * Math.Clamp(dt * WidthAnimSpeed, 0f, 1f);
+        float widthFactor = 1f + WidthBoost * _skillsWidthT;
+
+        Size          = new Vector2(FullSize.X * widthFactor, FullSize.Y) * openScale;
         SizeCondition = ImGuiCond.Always;
     }
 
@@ -231,6 +245,8 @@ public class RpCharacterWindow : Window, IDisposable
                     ImGui.TextColored(met ? new Vector4(0.45f, 0.85f, 0.45f, 1f) : new Vector4(0.65f, 0.65f, 0.65f, 1f),
                                       string.IsNullOrEmpty(cond) ? $"Always: {fx}" : $"If {cond}: {fx}");
                 }
+            if (item.GrantedPassives is { Count: > 0 })
+                ImGui.TextColored(new Vector4(0.65f, 0.75f, 1f, 1f), $"Grants passive: {ItemEffects.GrantedPassivesSummary(item.GrantedPassives)}");
             if (!string.IsNullOrWhiteSpace(item.Description))
             {
                 ImGui.PushTextWrapPos(260 * ImGuiHelpers.GlobalScale);

@@ -63,7 +63,7 @@ public class SkillsWindow : Window, IDisposable
     }
 
     private static SkillCondition CloneCond(SkillCondition c) => new() { FieldId = c.FieldId, Op = c.Op, Value = c.Value, IsPercentage = c.IsPercentage };
-    private static SkillEffect    CloneFx(SkillEffect e)      => new() { FieldId = e.FieldId, Op = e.Op, Value = e.Value, IsPercentage = e.IsPercentage };
+    private static SkillEffect    CloneFx(SkillEffect e)      => new() { FieldId = e.FieldId, Op = e.Op, Value = e.Value, IsPercentage = e.IsPercentage, GrantPassiveId = e.GrantPassiveId };
     private static EffectBlock    CloneBlock(EffectBlock b)   => new()
     {
         Conditions  = b.Conditions.Select(CloneCond).ToList(),
@@ -102,7 +102,7 @@ public class SkillsWindow : Window, IDisposable
             Id = s.Id, Name = s.Name, Description = s.Description, Type = s.Type,
             Cooldown = s.Cooldown, Duration = s.Duration,
             CooldownRemaining = s.CooldownRemaining, DurationRemaining = s.DurationRemaining,
-            IsLocked = s.IsLocked, TriggerOnTurnEnd = false,
+            IsLocked = s.IsLocked, Active = s.Active, IsDmSkill = s.IsDmSkill, TriggerOnTurnEnd = false,
             Conditions        = baseConds,
             Effects           = baseFx,
             ConditionalBlocks = blocks,
@@ -148,12 +148,14 @@ public class SkillsWindow : Window, IDisposable
             {
                 ImGui.Spacing();
                 int deleteAt = -1;
-                for (int i = 0; i < _draft.Count; i++)
+
+                void Row(int i)
                 {
                     var    sk    = _draft[i];
                     var    live  = character.State.Skills.FirstOrDefault(s => s.Id == sk.Id);
                     string badge = sk.Type == SkillType.Active ? "[A]" : "[P]";
-                    string tag   = live is { DurationRemaining: > 0 } ? $" [{live.DurationRemaining}t]"
+                    string tag   = live is { Active: true }            ? " *"
+                                 : live is { DurationRemaining: > 0 } ? $" [{live.DurationRemaining}t]"
                                  : live is { CooldownRemaining: > 0 } ? $" (cd:{live.CooldownRemaining}t)"
                                  : "";
                     bool selected = _selectedIdx == i;
@@ -171,11 +173,48 @@ public class SkillsWindow : Window, IDisposable
                         ImGui.EndPopup();
                     }
                 }
+
+                // Character skills first, then a divided "DM Skills" vault section for DM-authored ones.
+                for (int i = 0; i < _draft.Count; i++) if (!_draft[i].IsDmSkill) Row(i);
+
+                if (_draft.Any(s => s.IsDmSkill))
+                {
+                    ImGuiHelpers.ScaledDummy(4f);
+                    CharacterSheetWindow.DrawSectionHeader("DM Skills", scale);
+                    for (int i = 0; i < _draft.Count; i++) if (_draft[i].IsDmSkill) Row(i);
+                }
+
+                // Passives inherited from equipped items (read-only, active while the item is worn).
+                var granted = character.State.Equipment.Values
+                    .Where(it => it.GrantedPassives is { Count: > 0 })
+                    .SelectMany(it => it.GrantedPassives!.Select(p => (Item: it.Name, Skill: p))).ToList();
+                if (granted.Count > 0)
+                {
+                    ImGuiHelpers.ScaledDummy(4f);
+                    CharacterSheetWindow.DrawSectionHeader("From Equipment", scale);
+                    foreach (var (itemName, p) in granted)
+                    {
+                        ImGui.TextDisabled($"[P] {p.Name}");
+                        if (ImGui.IsItemHovered())
+                        {
+                            ImGui.BeginTooltip();
+                            ImGui.TextUnformatted($"From {itemName}");
+                            string fx = ItemEffects.Summary(p.Effects, template);
+                            if (!string.IsNullOrEmpty(fx)) ImGui.TextColored(new Vector4(0.45f, 0.85f, 0.45f, 1f), fx);
+                            ImGui.EndTooltip();
+                        }
+                    }
+                }
+
                 if (deleteAt >= 0)
                 {
                     _draft.RemoveAt(deleteAt);
                     if (_selectedIdx >= _draft.Count) _selectedIdx = _draft.Count - 1;
-                    _dirty = true;
+                    // Publish the deletion immediately: there is no Save button outside the editor, and a
+                    // removed skill must actually leave the server list for its (live) effects to disappear.
+                    _ = plugin.Network.CharacterSetSkills(code, _entityId, _draft.Select(Clone).ToList());
+                    _dirty   = false;
+                    _editing = false;
                 }
 
                 ImGui.Spacing(); ImGui.Separator(); ImGui.Spacing();
@@ -206,57 +245,70 @@ public class SkillsWindow : Window, IDisposable
 
     private void DrawEditor(RpSkill skill, SheetTemplate template, string code, float scale)
     {
-        ImGui.TextUnformatted("Name");
+        CharacterSheetWindow.DrawSectionHeader("Details", scale);
+
+        ImGui.TextColored(CharacterSheetWindow.LabelMuted, "Name");
         ImGui.SetNextItemWidth(-1);
         string name = skill.Name;
         if (ImGui.InputText("##rpsk_name", ref name, 64)) { skill.Name = name; _dirty = true; }
 
         ImGui.Spacing();
-        ImGui.TextUnformatted("Description");
+        ImGui.TextColored(CharacterSheetWindow.LabelMuted, "Description");
         ImGui.SetNextItemWidth(-1);
         string desc = skill.Description;
         if (ImGui.InputTextMultiline("##rpsk_desc", ref desc, 512, new Vector2(-1, 54 * scale))) { skill.Description = desc; _dirty = true; }
 
         ImGui.Spacing();
-        ImGui.TextUnformatted("Type");
+        ImGui.TextColored(CharacterSheetWindow.LabelMuted, "Type");
         int typeVal = (int)skill.Type;
         if (ImGui.RadioButton("Active##rpsk_ta",  ref typeVal, 0)) { skill.Type = SkillType.Active;  _dirty = true; }
         ImGui.SameLine();
         if (ImGui.RadioButton("Passive##rpsk_tp", ref typeVal, 1)) { skill.Type = SkillType.Passive; _dirty = true; }
 
+        // DM vault flag: a DM authors passives here to embed into items they hand out via trade.
+        if (plugin.IsDm(code))
+        {
+            ImGui.SameLine();
+            ImGuiHelpers.ScaledDummy(12f, 0f); ImGui.SameLine();
+            bool isDmSkill = skill.IsDmSkill;
+            if (ImGui.Checkbox("DM##rpsk_dm", ref isDmSkill)) { skill.IsDmSkill = isDmSkill; _dirty = true; }
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip("Mark as a DM vault skill: filed separately and usable as an item-granted passive.");
+        }
+
         ImGui.Spacing();
-        ImGui.TextUnformatted("Cooldown (turns)");
+        ImGui.TextColored(CharacterSheetWindow.LabelMuted, "Cooldown (turns)");
         ImGui.SetNextItemWidth(80 * scale);
         int cd = skill.Cooldown;
         if (ImGui.InputInt("##rpsk_cd", ref cd, 1, 1)) { skill.Cooldown = Math.Max(0, cd); _dirty = true; }
 
         ImGui.Spacing();
-        ImGui.TextUnformatted("Duration (turns)");
+        ImGui.TextColored(CharacterSheetWindow.LabelMuted, "Duration (turns)");
         ImGui.SetNextItemWidth(80 * scale);
         int dur = skill.Duration;
         if (ImGui.InputInt("##rpsk_dur", ref dur, 1, 1)) { skill.Duration = Math.Max(0, dur); _dirty = true; }
         ImGui.SameLine();
         ImGui.TextDisabled("0 = instant / permanent");
 
-        ImGui.Spacing(); ImGui.Separator();
+        ImGui.Spacing();
 
-        ImGui.TextUnformatted("Effects");
-        var fxFields = EffectEditor.TargetFields(template);
-        var fxNames  = fxFields.Select(f => f.Name).ToArray();
-        DrawEffects(skill.Effects, fxFields, fxNames, scale);
+        // Active skills can grant the character's own passives; passives can't (they never fire ApplyEffects).
+        var grantables = skill.Type == SkillType.Active
+            ? _draft.Where(s => s.Type == SkillType.Passive && s.Id != skill.Id).ToList()
+            : null;
+
+        CharacterSheetWindow.DrawSectionHeader("Effects", scale);
+        DrawEffects(skill.Effects, template, grantables, scale);
         if (ImGui.SmallButton("+ Add Effect##rpsk_addefx"))
-        { skill.Effects.Add(new SkillEffect { FieldId = fxFields.FirstOrDefault()?.Id ?? "" }); _dirty = true; }
+        { skill.Effects.Add(EffectEditor.NewEffect(template)); _dirty = true; }
 
         // Independent conditional blocks: extra (if -> then) groups on top of the base effects above.
-        ImGui.Spacing(); ImGui.Separator();
-        ImGui.TextUnformatted("Conditional blocks");
+        ImGui.Spacing();
+        CharacterSheetWindow.DrawSectionHeader("Conditional blocks", scale);
         ImGui.PushTextWrapPos(0f);
         ImGui.TextDisabled("Each block's effects apply independently while its own conditions hold. " +
-                           "Use the \"On Turn End\" trigger to fire a block once per turn instead.");
+                           "Set a block's Trigger to \"On Turn End\" to fire it once per turn instead.");
         ImGui.PopTextWrapPos();
-        var condFields = ConditionEditor.TargetFields(template, includeTurnEnd: true);
-        var condNames  = condFields.Select(f => f.Name).ToArray();
-        if (BlockListEditor.Draw(skill.ConditionalBlocks, condFields, condNames, fxFields, fxNames, scale, "rpsk_blocks"))
+        if (BlockListEditor.Draw(skill.ConditionalBlocks, template, includeBarCurrent: true, grantables, scale, "rpsk_blocks"))
             _dirty = true;
 
         // ── Save this edit (publishes the whole skill list) and return to the read-only view ──
@@ -274,10 +326,9 @@ public class SkillsWindow : Window, IDisposable
     /// button. An "Edit" button flips into <see cref="DrawEditor"/>. This is the default pane.</summary>
     private void DrawSkillView(RpSkill skill, SheetTemplate template, string code, float scale)
     {
-        ImGui.TextDisabled(skill.Type == SkillType.Active ? "[Active]" : "[Passive]");
-        ImGui.SameLine();
-        ImGui.TextUnformatted(skill.Name);
-        ImGui.Separator();
+        CharacterSheetWindow.DrawSectionHeader(skill.Name, scale);
+        ImGui.TextColored(CharacterSheetWindow.LabelMuted, skill.Type == SkillType.Active ? "Active" : "Passive");
+        if (skill.IsDmSkill) { ImGui.SameLine(); ImGui.TextColored(new Vector4(0.65f, 0.75f, 1f, 1f), "· DM"); }
 
         if (!string.IsNullOrWhiteSpace(skill.Description))
         {
@@ -285,21 +336,21 @@ public class SkillsWindow : Window, IDisposable
             ImGui.PushTextWrapPos(0f);
             ImGui.TextDisabled(skill.Description);
             ImGui.PopTextWrapPos();
-            ImGui.Spacing();
         }
 
         if (skill.Cooldown > 0 || skill.Duration > 0)
         {
+            ImGui.Spacing();
             if (skill.Cooldown > 0) ImGui.TextDisabled($"Cooldown: {skill.Cooldown}t");
             if (skill.Duration > 0) { if (skill.Cooldown > 0) ImGui.SameLine(); ImGui.TextDisabled($"  Duration: {skill.Duration}t"); }
         }
 
-        ImGui.Spacing(); ImGui.Separator();
+        ImGuiHelpers.ScaledDummy(4f);
 
         string baseFx = ItemEffects.Summary(skill.Effects, template);
         if (!string.IsNullOrEmpty(baseFx))
         {
-            ImGui.TextUnformatted("Effects");
+            CharacterSheetWindow.DrawSectionHeader("Effects", scale);
             ImGui.PushTextWrapPos(0f);
             ImGui.TextColored(new Vector4(0.45f, 0.85f, 0.45f, 1f), baseFx);
             ImGui.PopTextWrapPos();
@@ -308,8 +359,8 @@ public class SkillsWindow : Window, IDisposable
         if (skill.ConditionalBlocks.Count > 0)
         {
             var st = TargetCharacter()?.State;
-            ImGui.Spacing();
-            ImGui.TextUnformatted("Conditional");
+            ImGuiHelpers.ScaledDummy(4f);
+            CharacterSheetWindow.DrawSectionHeader("Conditional", scale);
             ImGui.PushTextWrapPos(0f);
             foreach (var b in skill.ConditionalBlocks)
             {
@@ -333,41 +384,44 @@ public class SkillsWindow : Window, IDisposable
         ImGui.TextDisabled("Right-click a skill in the list to edit or delete.");
     }
 
-    /// <summary>The Use/Trigger button + live cooldown/duration status, shared by the view and editor panes.</summary>
+    /// <summary>The Use/Toggle button + live status, shared by the view and editor panes. Active skills
+    /// fire once (UseSkill applies effects + cooldown); passives toggle their live effects on and off.</summary>
     private void DrawUseRow(RpSkill skill, string code)
     {
         var live = TargetCharacter()?.State.Skills.FirstOrDefault(s => s.Id == skill.Id);
+
+        if (skill.Type == SkillType.Passive)
+        {
+            bool on = live?.Active ?? false;
+            using (ImRaii.Disabled(_dirty || live == null))
+            using (ImRaii.PushColor(ImGuiCol.Button, on ? new Vector4(0.55f, 0.35f, 0.15f, 1f) : new Vector4(0.18f, 0.45f, 0.60f, 1f)))
+                if (ImGui.Button(on ? "Disable##rpsk_use" : "Enable##rpsk_use")) _ = plugin.Network.UseSkill(code, _entityId, skill.Id);
+            if (_dirty)  { ImGui.SameLine(); ImGui.TextDisabled("(save first)"); }
+            else if (on) { ImGui.SameLine(); ImGui.TextColored(new Vector4(0.2f, 0.85f, 0.3f, 1f), "● Active"); }
+            return;
+        }
+
         bool blocked = _dirty || live == null || live.CooldownRemaining > 0 || live.DurationRemaining > 0;
-        string useLabel = skill.Type == SkillType.Active ? "Use Skill##rpsk_use" : "Trigger##rpsk_use";
         using (ImRaii.Disabled(blocked))
-            if (ImGui.Button(useLabel)) _ = plugin.Network.UseSkill(code, _entityId, skill.Id);
+            if (ImGui.Button("Use Skill##rpsk_use")) _ = plugin.Network.UseSkill(code, _entityId, skill.Id);
         if (_dirty) { ImGui.SameLine(); ImGui.TextDisabled("(save first)"); }
         else if (live is { DurationRemaining: > 0 }) { ImGui.SameLine(); ImGui.TextColored(new Vector4(0.2f, 0.85f, 0.3f, 1f), $"● {live.DurationRemaining}t remaining"); }
         else if (live is { CooldownRemaining: > 0 }) { ImGui.SameLine(); ImGui.TextDisabled($"({live.CooldownRemaining}t cooldown)"); }
     }
 
-    private void DrawEffects(List<SkillEffect> fxs, List<SheetField> fields, string[] fieldNames, float scale)
+    private void DrawEffects(List<SkillEffect> fxs, SheetTemplate template, IReadOnlyList<RpSkill>? grantables, float scale)
     {
-        if (!ImGui.BeginTable("##rpsk_efx", 5, ImGuiTableFlags.SizingFixedFit | ImGuiTableFlags.BordersInnerV)) return;
-        SetupPartCols(scale);
+        if (fxs.Count == 0) return;
+        if (!ImGui.BeginTable("##rpsk_efx", 6, ImGuiTableFlags.SizingFixedFit | ImGuiTableFlags.BordersInnerV)) return;
+        EffectEditor.SetupCols(scale);
         for (int i = fxs.Count - 1; i >= 0; i--)
         {
             ImGui.TableNextRow(); ImGui.PushID($"##efx{i}");
-            if (EffectEditor.DrawRow(fxs[i], fields, fieldNames)) _dirty = true;
-            ImGui.TableSetColumnIndex(4);
+            if (EffectEditor.DrawRow(fxs[i], template, includeBarCurrent: true, grantables)) _dirty = true;
+            ImGui.TableSetColumnIndex(5);
             if (ImGui.SmallButton($"X##edel{i}")) { fxs.RemoveAt(i); _dirty = true; }
             ImGui.PopID();
         }
         ImGui.EndTable();
-    }
-
-    private static void SetupPartCols(float scale)
-    {
-        ImGui.TableSetupColumn("Field", ImGuiTableColumnFlags.WidthFixed, 80 * scale);
-        ImGui.TableSetupColumn("Op",    ImGuiTableColumnFlags.WidthFixed, 52 * scale);
-        ImGui.TableSetupColumn("Value", ImGuiTableColumnFlags.WidthFixed, 60 * scale);
-        ImGui.TableSetupColumn("%",     ImGuiTableColumnFlags.WidthFixed, 24 * scale);
-        ImGui.TableSetupColumn("",      ImGuiTableColumnFlags.WidthFixed, 22 * scale);
-        ImGui.TableHeadersRow();
     }
 }

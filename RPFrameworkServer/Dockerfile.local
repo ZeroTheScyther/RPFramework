@@ -1,0 +1,19 @@
+# No-RUN image for hosts where Docker's AppArmor profile is broken (build-time RUN steps
+# fail to start). Publish on the host first, then this only COPIES the output — no container
+# process runs during build, so AppArmor is never touched.
+#
+#   ~/.dotnet/dotnet publish RPFrameworkServer/RPFrameworkServer.csproj -c Release -o publish
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
+#
+# On a normal host, ignore this file and use the standard multi-stage RPFrameworkServer/Dockerfile.
+
+FROM mcr.microsoft.com/dotnet/aspnet:10.0
+WORKDIR /app
+COPY publish/ .
+ENV ASPNETCORE_URLS=http://0.0.0.0:8080
+ENV BGM_CACHE_DIR=/data/bgm_cache
+EXPOSE 8080
+# NOTE: this no-RUN image cannot apt-install ffmpeg/yt-dlp. For server-side BGM audio either use the
+# standard RPFrameworkServer/Dockerfile, or make `ffmpeg` and `yt-dlp` available on PATH another way
+# (e.g. bind-mount host binaries into /usr/local/bin).
+ENTRYPOINT ["dotnet", "RPFrameworkServer.dll"]

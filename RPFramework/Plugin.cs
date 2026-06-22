@@ -33,7 +33,6 @@ public sealed class Plugin : IDalamudPlugin
         CmdSheet = "/rpsheet", CmdSheetShort = "/rpcs", CmdStats = "/rpstats", CmdDice = "/rpdice",
         CmdSkills = "/rpskills", CmdSkillsShort = "/rpsk", CmdEquipment = "/rpequipment",
         CmdCharacter = "/rpcharacter", CmdNpc = "/rpnpc", CmdHelp = "/rphelp";
-    private const string DefaultServerUrl = "https://rpframework.example.com";
 
     public Configuration Configuration { get; init; }
     public readonly WindowSystem WindowSystem = new("RPFramework");
@@ -58,9 +57,8 @@ public sealed class Plugin : IDalamudPlugin
     internal RpNpcWindow            RpNpcWindow             { get; }
     private HelpWindow              HelpWindow              { get; }
 
-    // Dynamic read-only windows for remote players, keyed by playerId
+    // Dynamic read-only windows for remote players, keyed by playerId (one unified tabbed sheet each)
     private readonly Dictionary<string, PlayerSheetWindow>  _playerSheetWindows  = new();
-    private readonly Dictionary<string, PlayerSkillsWindow> _playerSkillsWindows = new();
 
     // Open nested-bag windows, keyed by "{bagId}:{path}" so a bag-in-a-bag is its own window
     private readonly Dictionary<string, BagItemWindow> _bagWindows = new();
@@ -84,6 +82,8 @@ public sealed class Plugin : IDalamudPlugin
         BgmService = new BgmService(bgmCacheDir);
         Store      = new RpStateStore();
         Network    = new NetworkService(Store);
+        // The server prepares + serves the WAV; the client just fetches it (no local yt-dlp/ffmpeg/codec).
+        BgmService.ResolveAudioUrl = Network.ResolveBgmAudio;
         Bgm        = new BgmCoordinator(Store, Network, BgmService, () => Configuration.BgmVolume);
 
         HubWindow               = new HubWindow(this);
@@ -142,7 +142,7 @@ public sealed class Plugin : IDalamudPlugin
         Framework.Update                       += OnFrameworkUpdate;
         ClientState.Login                      += OnLogin;
 
-        _autoConnectPending = Configuration.ServerUrl != DefaultServerUrl;
+        _autoConnectPending = !string.IsNullOrWhiteSpace(Configuration.ServerUrl);
     }
 
     private static void AddCommand(string cmd, IReadOnlyCommandInfo.HandlerDelegate handler, string help)
@@ -161,7 +161,6 @@ public sealed class Plugin : IDalamudPlugin
         ContextMenu.OnMenuOpened       -= OnContextMenuOpened;
 
         foreach (var w in _playerSheetWindows.Values)  w.Dispose();
-        foreach (var w in _playerSkillsWindows.Values) w.Dispose();
 
         Framework.Update                       -= OnFrameworkUpdate;
         ClientState.Login                      -= OnLogin;
@@ -237,7 +236,7 @@ public sealed class Plugin : IDalamudPlugin
 
     private void OnLogin()
     {
-        if (Configuration.ServerUrl != DefaultServerUrl && !Network.IsConnected)
+        if (!string.IsNullOrWhiteSpace(Configuration.ServerUrl) && !Network.IsConnected)
             Connect();
     }
 
@@ -247,7 +246,9 @@ public sealed class Plugin : IDalamudPlugin
         if (Configuration.ActiveCampaignCode != null)
             Store.ActiveCampaign = Configuration.ActiveCampaignCode;
         // BGM room membership is persistent server-side — the server re-adds us to our room groups
-        // on Identify, so there's nothing to re-join here.
+        // on Identify, so there's nothing to re-join here. But the per-connection "active listener"
+        // map is fresh after a (re)connect, so re-declare which room we're listening to.
+        Bgm.ReassertActive();
     }
 
     private void OnDisconnected() => Store.Clear();
@@ -393,13 +394,13 @@ public sealed class Plugin : IDalamudPlugin
     // Remote player windows (read straight from the store — no fetch needed)
     // ═════════════════════════════════════════════════════════════════════════
 
-    public void OpenPlayerSheet(string playerId)
+    public void OpenPlayerSheet(string playerId, RpCharacterWindow.Tab tab = RpCharacterWindow.Tab.Profile)
     {
-        if (_playerSheetWindows.TryGetValue(playerId, out var existing)) { existing.IsOpen = true; return; }
+        if (_playerSheetWindows.TryGetValue(playerId, out var existing)) { existing.ShowTab(tab); existing.IsOpen = true; return; }
         var win = new PlayerSheetWindow(this, playerId, id =>
         {
             if (_playerSheetWindows.Remove(id, out var w)) WindowSystem.RemoveWindow(w);
-        });
+        }, tab);
         _playerSheetWindows[playerId] = win;
         WindowSystem.AddWindow(win);
         win.IsOpen = true;
@@ -420,17 +421,8 @@ public sealed class Plugin : IDalamudPlugin
         win.IsOpen = true;
     }
 
-    public void OpenPlayerSkills(string playerId)
-    {
-        if (_playerSkillsWindows.TryGetValue(playerId, out var existing)) { existing.IsOpen = true; return; }
-        var win = new PlayerSkillsWindow(this, playerId, id =>
-        {
-            if (_playerSkillsWindows.Remove(id, out var w)) WindowSystem.RemoveWindow(w);
-        });
-        _playerSkillsWindows[playerId] = win;
-        WindowSystem.AddWindow(win);
-        win.IsOpen = true;
-    }
+    /// <summary>A remote player's skills now live in the unified read-only sheet window (Skills tab).</summary>
+    public void OpenPlayerSkills(string playerId) => OpenPlayerSheet(playerId, RpCharacterWindow.Tab.Skills);
 
     public void OpenSheetForParty(string code)
     {

@@ -18,7 +18,7 @@ public sealed class RpStateStore
 {
     private readonly Dictionary<string, PartyDto>             _parties     = new();   // by campaign code
     private readonly Dictionary<string, TemplateDto>          _templates   = new();   // by campaign code
-    private readonly Dictionary<string, InitiativeStateDto>   _initiatives = new();   // by campaign code
+    private readonly Dictionary<string, EncounterDto>        _encounters  = new();   // by encounter id
     private readonly Dictionary<(string, string), CharacterDto> _characters = new();  // by (code, entityId)
     private readonly Dictionary<Guid, BagDto>                 _bags        = new();   // by bag id
     private readonly Dictionary<string, RoomStateDto>         _rooms       = new();   // by room code
@@ -53,8 +53,12 @@ public sealed class RpStateStore
     public IEnumerable<CharacterDto> NpcsIn(string code)
         => _characters.Values.Where(c => c.PartyCode == code && c.Kind == EntityKind.Npc);
 
-    public InitiativeStateDto? Initiative(string? code) => code != null && _initiatives.TryGetValue(code, out var i) ? i : null;
-    public IReadOnlyCollection<InitiativeStateDto> Initiatives => _initiatives.Values.ToList();
+    public EncounterDto? Encounter(string? encounterId) => encounterId != null && _encounters.TryGetValue(encounterId, out var e) ? e : null;
+    public IReadOnlyCollection<EncounterDto> Encounters => _encounters.Values.ToList();
+    /// <summary>All live encounters in a campaign (ordered by name for a stable list).</summary>
+    public IReadOnlyList<EncounterDto> EncountersIn(string? code)
+        => code == null ? Array.Empty<EncounterDto>()
+                        : _encounters.Values.Where(e => e.CampaignCode == code).OrderBy(e => e.Name).ToList();
 
     public IReadOnlyCollection<BagDto> Bags => _bags.Values.ToList();
     public BagDto? Bag(Guid id) => _bags.TryGetValue(id, out var b) ? b : null;
@@ -70,13 +74,13 @@ public sealed class RpStateStore
 
     public void ApplySnapshot(SnapshotDto s)
     {
-        _parties.Clear(); _templates.Clear(); _initiatives.Clear();
+        _parties.Clear(); _templates.Clear(); _encounters.Clear();
         _characters.Clear(); _bags.Clear(); _rooms.Clear();
 
         foreach (var p in s.Parties)     _parties[p.Code]     = p;
         foreach (var t in s.Templates)   _templates[t.PartyCode] = t;
         foreach (var c in s.Characters)  _characters[(c.PartyCode, c.EntityId)] = c;
-        foreach (var i in s.Initiatives) _initiatives[i.PartyCode] = i;
+        foreach (var e in s.Encounters)  _encounters[e.EncounterId] = e;
         foreach (var b in s.Bags)        _bags[b.BagId]       = b;
         foreach (var r in s.Rooms)       _rooms[r.Code]       = r;
 
@@ -86,7 +90,7 @@ public sealed class RpStateStore
 
     public void Clear()
     {
-        _parties.Clear(); _templates.Clear(); _initiatives.Clear();
+        _parties.Clear(); _templates.Clear(); _encounters.Clear();
         _characters.Clear(); _bags.Clear(); _rooms.Clear();
         Hydrated = false;
         Raise();
@@ -105,7 +109,8 @@ public sealed class RpStateStore
     {
         bool any = _parties.Remove(code);
         _templates.Remove(code);
-        _initiatives.Remove(code);
+        foreach (var eid in _encounters.Where(kv => kv.Value.CampaignCode == code).Select(kv => kv.Key).ToList())
+            _encounters.Remove(eid);
         foreach (var key in _characters.Keys.Where(k => k.Item1 == code).ToList()) _characters.Remove(key);
         if (ActiveCampaign == code) ActiveCampaign = null;
         if (any) Raise();
@@ -131,16 +136,16 @@ public sealed class RpStateStore
         Raise();
     }
 
-    public void ApplyInitiative(InitiativeStateDto i)
+    public void ApplyEncounter(EncounterDto e)
     {
-        if (_initiatives.TryGetValue(i.PartyCode, out var cur) && cur.Version > i.Version) return;
-        _initiatives[i.PartyCode] = i;
+        if (_encounters.TryGetValue(e.EncounterId, out var cur) && cur.Version > e.Version) return;
+        _encounters[e.EncounterId] = e;
         Raise();
     }
 
-    public void RemoveInitiative(string code)
+    public void RemoveEncounter(string encounterId)
     {
-        if (_initiatives.Remove(code)) Raise();
+        if (_encounters.Remove(encounterId)) Raise();
     }
 
     public void ApplyBag(BagDto b)

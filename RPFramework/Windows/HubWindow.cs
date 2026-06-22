@@ -192,7 +192,7 @@ public class HubWindow : Window, IDisposable
             DrawIconButton(FontAwesomeIcon.EllipsisV, "##pe_" + party.Code);
             if (ImGui.IsItemClicked()) { _flyoutKind = "party"; _flyoutCode = party.Code; _flyoutPlayer = null; _flyoutPos = ImGui.GetItemRectMax(); _flyoutPending = true; }
 
-            bool   inCombat  = plugin.Store.Initiative(party.Code) != null;
+            bool   inCombat  = plugin.Store.EncountersIn(party.Code).Count > 0;
             bool   isActive  = plugin.ActiveCampaign == party.Code;
             string combatTag = "  In Combat";
             float  combatW   = inCombat ? (ImGui.CalcTextSize(combatTag).X + ImGui.GetStyle().ItemSpacing.X) : 0f;

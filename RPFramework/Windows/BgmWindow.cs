@@ -61,7 +61,14 @@ public class BgmWindow : Window, IDisposable
         if (_pendingCreate) { _createOpen = true; ImGui.OpenPopup("##bgm_create"); _pendingCreate = false; }
 
         float scale = ImGuiHelpers.GlobalScale;
-        var rooms = plugin.Store.Rooms.OrderBy(r => r.Name).ToList();
+        // Active party is the scope, and rooms live within their scope: show only the active campaign's
+        // rooms (campaign scope) or solo rooms (personal scope). Switching campaigns swaps the room list.
+        string? scope = ScopeCampaign();
+        var rooms = plugin.Store.Rooms
+            .Where(r => string.IsNullOrEmpty(scope)
+                ? string.IsNullOrEmpty(r.CampaignCode)
+                : r.CampaignCode == scope)
+            .OrderBy(r => r.Name).ToList();
 
         ImGui.TextDisabled("Rooms");
         ImGui.Separator();

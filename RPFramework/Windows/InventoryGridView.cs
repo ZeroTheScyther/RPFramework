@@ -45,6 +45,7 @@ public sealed class InventoryGridView
     private readonly List<(string Name, uint IconId)> _iconResults = new();
     private readonly List<SkillEffect>    _effects    = new();
     private readonly List<EffectBlock>    _blocks     = new();
+    private readonly List<RpSkill>        _grantedPassives = new();   // DM-embedded passives this equippable item grants its wearer
 
     // Amount prompt, shared by Split and stackable trades
     private bool        _pendingAmt, _amtOpen;
@@ -292,8 +293,20 @@ public sealed class InventoryGridView
             });
             _effects.Clear(); // base effects moved into the block
         }
+        _grantedPassives.Clear();
+        if (item?.GrantedPassives != null) _grantedPassives.AddRange(item.GrantedPassives.Select(CloneSkill));
         _pendingItem = true;
     }
+
+    /// <summary>Deep copy of a skill so the modal's editable list never shares references with a stored DTO.</summary>
+    private static RpSkill CloneSkill(RpSkill s) => new()
+    {
+        Id = s.Id, Name = s.Name, Description = s.Description, Type = s.Type,
+        Cooldown = s.Cooldown, Duration = s.Duration, IsLocked = s.IsLocked, IsDmSkill = s.IsDmSkill,
+        Conditions        = s.Conditions.Select(c => new SkillCondition { FieldId = c.FieldId, Op = c.Op, Value = c.Value, IsPercentage = c.IsPercentage }).ToList(),
+        Effects           = s.Effects.Select(e => new SkillEffect { FieldId = e.FieldId, Op = e.Op, Value = e.Value, IsPercentage = e.IsPercentage, GrantPassiveId = e.GrantPassiveId }).ToList(),
+        ConditionalBlocks = s.ConditionalBlocks.Select(CloneBlock).ToList(),
+    };
 
     private void DrawItemModal()
     {
@@ -334,7 +347,10 @@ public sealed class InventoryGridView
             // Independent conditional blocks (equipment only): extra (if -> then) groups summed when met,
             // on top of the always-on base effects above. Consumables are point-of-use, so no blocks.
             if (_type.IsEquippable())
+            {
                 DrawItemBlocks(scale);
+                DrawItemGrantedPassives(scale);
+            }
         }
 
         ImGui.Spacing();
@@ -373,8 +389,11 @@ public sealed class InventoryGridView
                 List<EffectBlock>? blocks = _type.IsEquippable() && _blocks.Count > 0
                     ? _blocks.Select(CloneBlock).ToList()
                     : null;
+                List<RpSkill>? granted = _type.IsEquippable() && _grantedPassives.Count > 0
+                    ? _grantedPassives.Select(CloneSkill).ToList()
+                    : null;
                 // Base conditions are retired; conditional logic lives entirely in blocks (Conditions = null).
-                var dto = new RpItemDto(_editItemId ?? Guid.NewGuid(), _name.Trim(), _desc, _iconId, _amount, _type, _capacity, null, fx, null, blocks);
+                var dto = new RpItemDto(_editItemId ?? Guid.NewGuid(), _name.Trim(), _desc, _iconId, _amount, _type, _capacity, null, fx, null, blocks, granted);
                 if (_editItemId == null) _ = plugin.Network.ItemAdd(_itemBag, _itemPath, dto);
                 else                     _ = plugin.Network.ItemUpdate(_itemBag, _itemPath, dto);
                 _itemOpen = false; ImGui.CloseCurrentPopup();
@@ -398,43 +417,73 @@ public sealed class InventoryGridView
     {
         var template = plugin.Store.TemplateOrDefault(_itemCode);
         // Equipment effects only raise a pool's max; consumables can also touch the current value.
-        var fields    = EffectEditor.TargetFields(template, includeBarCurrent: _type == RpItemType.Consumable);
-        var names     = fields.Select(f => f.Name).ToArray();
-        if (fields.Count == 0) { ImGui.TextDisabled("Publish a sheet template with stats to add effects."); return; }
+        bool barCurrent = _type == RpItemType.Consumable;
+        if (EffectEditor.StatFields(template, barCurrent).Count == 0 && EffectEditor.SpecFields(template).Count == 0)
+        { ImGui.TextDisabled("Publish a sheet template with stats to add effects."); return; }
 
-        if (ImGui.BeginTable("##itefx", 5, ImGuiTableFlags.SizingFixedFit | ImGuiTableFlags.BordersInnerV))
+        if (_effects.Count > 0 && ImGui.BeginTable("##itefx", 6, ImGuiTableFlags.SizingFixedFit | ImGuiTableFlags.BordersInnerV))
         {
-            ImGui.TableSetupColumn("Field", ImGuiTableColumnFlags.WidthFixed, 96 * scale);
-            ImGui.TableSetupColumn("Op",    ImGuiTableColumnFlags.WidthFixed, 44 * scale);
-            ImGui.TableSetupColumn("Value", ImGuiTableColumnFlags.WidthFixed, 56 * scale);
-            ImGui.TableSetupColumn("%",     ImGuiTableColumnFlags.WidthFixed, 22 * scale);
-            ImGui.TableSetupColumn("",      ImGuiTableColumnFlags.WidthFixed, 22 * scale);
-            ImGui.TableHeadersRow();
+            EffectEditor.SetupCols(scale);
             for (int i = _effects.Count - 1; i >= 0; i--)
             {
                 ImGui.TableNextRow(); ImGui.PushID($"##itfx{i}");
-                EffectEditor.DrawRow(_effects[i], fields, names);
-                ImGui.TableSetColumnIndex(4);
+                EffectEditor.DrawRow(_effects[i], template, barCurrent);   // items use GrantedPassives, not the passive-grant category
+                ImGui.TableSetColumnIndex(5);
                 if (ImGui.SmallButton($"X##d{i}")) _effects.RemoveAt(i);
                 ImGui.PopID();
             }
             ImGui.EndTable();
         }
-        if (ImGui.SmallButton("+ Add effect")) _effects.Add(new SkillEffect { FieldId = fields.FirstOrDefault()?.Id ?? "" });
+        if (ImGui.SmallButton("+ Add effect")) _effects.Add(EffectEditor.NewEffect(template));
     }
 
     private void DrawItemBlocks(float scale)
     {
-        var template   = plugin.Store.TemplateOrDefault(_itemCode);
-        var condFields = ConditionEditor.TargetFields(template);
-        var condNames  = condFields.Select(f => f.Name).ToArray();
-        var fxFields   = EffectEditor.TargetFields(template, includeBarCurrent: false); // equipment raises max only
-        var fxNames    = fxFields.Select(f => f.Name).ToArray();
-        if (fxFields.Count == 0) return;
+        var template = plugin.Store.TemplateOrDefault(_itemCode);
+        if (EffectEditor.StatFields(template, false).Count == 0 && EffectEditor.SpecFields(template).Count == 0) return;
 
         ImGui.Spacing();
         ImGui.TextDisabled("Conditional blocks (each applies independently while its conditions hold):");
-        BlockListEditor.Draw(_blocks, condFields, condNames, fxFields, fxNames, scale, "itblocks");
+        // Equipment raises a pool's max only; item blocks never tick at turn end, so no On-Turn-End trigger.
+        BlockListEditor.Draw(_blocks, template, includeBarCurrent: false, grantablePassives: null, scale, "itblocks", allowTurnEnd: false);
+    }
+
+    /// <summary>DM-only: embed passives from the DM's skill vault into this item. The wearer inherits them
+    /// (live) while the item is equipped; the definitions travel with the item through trade.</summary>
+    private void DrawItemGrantedPassives(float scale)
+    {
+        if (!plugin.IsDm(_itemCode)) return;
+
+        var vault = plugin.Store.Character(_itemCode, plugin.LocalPlayerId ?? "")?.State.Skills
+                          .Where(s => s.IsDmSkill && s.Type == SkillType.Passive).ToList() ?? new();
+
+        ImGui.Spacing();
+        ImGui.TextDisabled("Granted passives (worn = active):");
+        for (int i = _grantedPassives.Count - 1; i >= 0; i--)
+        {
+            ImGui.BulletText(_grantedPassives[i].Name);
+            ImGui.SameLine();
+            if (ImGui.SmallButton($"X##gp{i}")) _grantedPassives.RemoveAt(i);
+        }
+
+        var addable = vault.Where(v => _grantedPassives.All(g => g.Id != v.Id)).ToList();
+        using (ImRaii.Disabled(addable.Count == 0))
+            if (ImGui.SmallButton("+ Add granted passive") && addable.Count > 0)
+                ImGui.OpenPopup("##gp_add");
+        if (vault.Count == 0)
+        { ImGui.SameLine(); ImGui.TextDisabled("(mark a passive 'DM' in /rpskills first)"); }
+
+        if (ImGui.BeginPopup("##gp_add"))
+        {
+            foreach (var v in addable)
+                if (ImGui.MenuItem(v.Name))
+                {
+                    var c = CloneSkill(v);
+                    c.IsDmSkill = false;   // embedded copy is an item grant, not a vault entry
+                    _grantedPassives.Add(c);
+                }
+            ImGui.EndPopup();
+        }
     }
 
     /// <summary>Deep copy of a block so the modal's editable list never shares references with a stored DTO.</summary>

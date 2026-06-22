@@ -2,6 +2,7 @@ using System;
 using System.Linq;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
+using Dalamud.Interface.Textures;
 using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
 using Dalamud.Interface.Windowing;
@@ -10,8 +11,10 @@ using RPFramework.Contracts;
 namespace RPFramework.Windows;
 
 /// <summary>
-/// Read-only character sheet for a remote player. Reads straight from the store — the
-/// server hydrates every campaign member's character, so no fetch is needed.
+/// Read-only character window for a remote player, presented with the same tabbed RPCHARACTER look
+/// (Profile / Stats / Skills / Equipment) as the local character window — just non-editable. Reads
+/// straight from the store: the server hydrates every campaign member's character, so no fetch is needed.
+/// One instance per viewed player (raised again if reopened).
 /// </summary>
 public class PlayerSheetWindow : Window, IDisposable
 {
@@ -20,25 +23,44 @@ public class PlayerSheetWindow : Window, IDisposable
     private readonly string? _code;
     private readonly Action<string> _onClosed;
 
-    public PlayerSheetWindow(Plugin plugin, string playerId, Action<string> onClosed)
+    private RpCharacterWindow.Tab _pendingTab;
+    private bool _forceTab = true;
+    private int  _skillSel = -1;
+
+    public PlayerSheetWindow(Plugin plugin, string playerId, Action<string> onClosed,
+                             RpCharacterWindow.Tab initialTab = RpCharacterWindow.Tab.Profile)
         : base($"Character Sheet##rpcs_{playerId}",
                ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse)
     {
-        _plugin   = plugin;
-        _playerId = playerId;
-        _code     = plugin.ActiveCampaign;
-        _onClosed = onClosed;
+        _plugin     = plugin;
+        _playerId   = playerId;
+        _code       = plugin.ActiveCampaign;
+        _onClosed   = onClosed;
+        _pendingTab = initialTab;
         SizeConstraints = new WindowSizeConstraints
         {
-            MinimumSize = new Vector2(340, 480),
-            MaximumSize = new Vector2(600, 900),
+            MinimumSize = new Vector2(420, 520),
+            MaximumSize = new Vector2(700, 1000),
         };
-        Size          = new Vector2(380, 580);
+        Size          = new Vector2(540, 740);
         SizeCondition = ImGuiCond.FirstUseEver;
     }
 
+    /// <summary>Jump an already-open window to a specific tab (used when "Open Skills" hits an open sheet).</summary>
+    public void ShowTab(RpCharacterWindow.Tab tab) { _pendingTab = tab; _forceTab = true; }
+
     public override void OnClose() => _onClosed(_playerId);
     public void Dispose() { }
+
+    /// <summary>Title the window after the character's name, like the local RPCHARACTER window.</summary>
+    public override void PreDraw()
+    {
+        var ch = _code != null ? _plugin.Store.Character(_code, _playerId) : null;
+        string title = ch?.DisplayName ?? "Character Sheet";
+        if (ch != null && ch.State.TextValues.TryGetValue(WellKnownIds.Name, out string? nm) && !string.IsNullOrWhiteSpace(nm))
+            title = nm!;
+        WindowName = $"{title}##rpcs_{_playerId}";
+    }
 
     public override void Draw()
     {
@@ -53,13 +75,125 @@ public class PlayerSheetWindow : Window, IDisposable
         var   template = _plugin.Store.TemplateOrDefault(_code);
         float scale    = ImGuiHelpers.GlobalScale;
 
-        ImGui.TextUnformatted(ch.DisplayName);
-        ImGui.Separator();
+        using var tabs = ImRaii.TabBar("##rpcsremote_tabs");
+        if (!tabs) return;
+        DrawTab(RpCharacterWindow.Tab.Profile,   "Profile",   st, template, scale);
+        DrawTab(RpCharacterWindow.Tab.Stats,     "Stats",     st, template, scale);
+        DrawTab(RpCharacterWindow.Tab.Skills,    "Skills",    st, template, scale);
+        DrawTab(RpCharacterWindow.Tab.Equipment, "Equipment", st, template, scale);
+    }
 
-        using var scroll = ImRaii.Child("##psheetscroll", new Vector2(-1, -1), false, ImGuiWindowFlags.HorizontalScrollbar);
-        if (!scroll) return;
+    private void DrawTab(RpCharacterWindow.Tab tab, string label, CharacterState st, SheetTemplate template, float scale)
+    {
+        var flags = ImGuiTabItemFlags.None;
+        if (_forceTab && _pendingTab == tab) flags |= ImGuiTabItemFlags.SetSelected;
+        if (!ImGui.BeginTabItem($"{label}##rpcsremote_{tab}", flags)) return;
+        if (_forceTab && _pendingTab == tab) _forceTab = false;
 
-        DrawGroups(st, template, scale);
+        // AlwaysVerticalScrollbar reserves the gutter so the content width can't oscillate (toggling the
+        // vertical bar would otherwise re-trigger the horizontal bar every frame — the "flickering" loop).
+        using (var body = ImRaii.Child($"##rpcsremote_body{tab}", new Vector2(-1, -1), false,
+                                       ImGuiWindowFlags.HorizontalScrollbar | ImGuiWindowFlags.AlwaysVerticalScrollbar))
+            if (body)
+                switch (tab)
+                {
+                    case RpCharacterWindow.Tab.Profile:
+                        DrawGroups(st, template, scale, CharacterSheetWindow.IsProfileGroup);
+                        break;
+                    case RpCharacterWindow.Tab.Stats:
+                        DrawGroups(st, template, scale, g => !CharacterSheetWindow.IsProfileGroup(g));
+                        break;
+                    case RpCharacterWindow.Tab.Skills:
+                        var granted = st.Equipment.Values
+                            .Where(it => it.GrantedPassives is { Count: > 0 })
+                            .SelectMany(it => it.GrantedPassives!.Select(p => (it.Name, p)))
+                            .ToList();
+                        // DM vault skills are author-only: hidden from players viewing someone else's sheet.
+                        var visibleSkills = _plugin.IsDm(_code) ? st.Skills : st.Skills.Where(s => !s.IsDmSkill).ToList();
+                        PlayerSkillsWindow.DrawReadOnly(template, visibleSkills, ref _skillSel, scale, granted);
+                        break;
+                    case RpCharacterWindow.Tab.Equipment:
+                        DrawEquipmentReadOnly(st, template, scale);
+                        break;
+                }
+        ImGui.EndTabItem();
+    }
+
+    // ── Read-only equipment paper-doll (mirrors RpCharacterWindow, no unequip controls) ──
+
+    private static void DrawEquipmentReadOnly(CharacterState st, SheetTemplate template, float scale)
+    {
+        bool any = ItemSlots.EquipOrder.Any(s => st.Equipment.ContainsKey(s));
+        if (!any) { ImGui.TextDisabled("Nothing equipped."); return; }
+
+        float sz = 40 * scale;
+        using var table = ImRaii.Table("##rpcsremote_equip", 2, ImGuiTableFlags.SizingFixedFit);
+        if (!table) return;
+        foreach (var slot in ItemSlots.EquipOrder)
+        {
+            ImGui.TableNextColumn();
+            DrawEquipSlot(st, template, slot, sz);
+        }
+    }
+
+    private static void DrawEquipSlot(CharacterState st, SheetTemplate template, RpItemType slot, float sz)
+    {
+        st.Equipment.TryGetValue(slot, out var item);
+        var pos = ImGui.GetCursorScreenPos();
+        var dl  = ImGui.GetWindowDrawList();
+
+        if (item is { IconId: > 0 })
+        {
+            var wrap = Plugin.TextureProvider.GetFromGameIcon(new GameIconLookup(item.IconId)).GetWrapOrEmpty();
+            ImGui.Image(wrap.Handle, new Vector2(sz, sz));
+        }
+        else
+        {
+            dl.AddRectFilled(pos, pos + new Vector2(sz, sz), 0xFF2A2A2A);
+            dl.AddRect(pos,       pos + new Vector2(sz, sz), 0xFF505050);
+            ImGui.Dummy(new Vector2(sz, sz));
+        }
+
+        if (item != null && ImGui.IsItemHovered())
+        {
+            ImGui.BeginTooltip();
+            ImGui.TextUnformatted(item.Name);
+            ImGui.TextDisabled(slot.Label());
+            if (item.Effects is { Count: > 0 })
+                ImGui.TextColored(new Vector4(0.45f, 0.85f, 0.45f, 1f), ItemEffects.Summary(item.Effects, template));
+            if (item.Conditions is { Count: > 0 })
+            {
+                bool active = StatMath.ItemActive(item, st, template);
+                ImGui.TextColored(new Vector4(0.70f, 0.70f, 0.45f, 1f), $"While: {ItemEffects.ConditionSummary(item.Conditions, template)}");
+                ImGui.TextColored(active ? new Vector4(0.45f, 0.85f, 0.45f, 1f) : new Vector4(0.85f, 0.45f, 0.45f, 1f),
+                                  active ? "(active)" : "(inactive)");
+            }
+            if (item.Blocks is { Count: > 0 })
+                foreach (var b in item.Blocks)
+                {
+                    string fx = ItemEffects.Summary(b.Effects, template);
+                    if (string.IsNullOrEmpty(fx)) continue;
+                    string cond = ItemEffects.ConditionSummary(b.Conditions, template);
+                    bool   met  = StatMath.ConditionsMet(b.Conditions, st, template);
+                    ImGui.TextColored(met ? new Vector4(0.45f, 0.85f, 0.45f, 1f) : new Vector4(0.65f, 0.65f, 0.65f, 1f),
+                                      string.IsNullOrEmpty(cond) ? $"Always: {fx}" : $"If {cond}: {fx}");
+                }
+            if (item.GrantedPassives is { Count: > 0 })
+                ImGui.TextColored(new Vector4(0.65f, 0.75f, 1f, 1f), $"Grants passive: {ItemEffects.GrantedPassivesSummary(item.GrantedPassives)}");
+            if (!string.IsNullOrWhiteSpace(item.Description))
+            {
+                ImGui.PushTextWrapPos(260 * ImGuiHelpers.GlobalScale);
+                ImGui.TextDisabled(item.Description);
+                ImGui.PopTextWrapPos();
+            }
+            ImGui.EndTooltip();
+        }
+
+        ImGui.SameLine();
+        using var g = ImRaii.Group();
+        ImGui.TextDisabled(slot.Label());
+        if (item != null) ImGui.TextUnformatted(item.Name);
+        else              ImGui.TextDisabled("(empty)");
     }
 
     /// <summary>Renders a read-only sheet: each group (optionally filtered) that has any visible content.

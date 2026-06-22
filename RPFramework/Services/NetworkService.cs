@@ -25,6 +25,7 @@ public sealed class NetworkService : IDisposable
     private string _playerId    = string.Empty;
     private string _secret      = string.Empty;
     private string _displayName = string.Empty;
+    private string _baseUrl     = string.Empty;   // server origin (no trailing /), for HTTP asset fetches
 
     public NetworkService(RpStateStore store) => _store = store;
 
@@ -68,6 +69,7 @@ public sealed class NetworkService : IDisposable
         {
             if (_conn != null) await _conn.DisposeAsync();
             _playerId = playerId; _secret = secret; _displayName = displayName;
+            _baseUrl  = serverUrl.TrimEnd('/');
 
             _conn = new HubConnectionBuilder()
                 .WithUrl(serverUrl.TrimEnd('/') + HubRoutes.Path)
@@ -121,8 +123,8 @@ public sealed class NetworkService : IDisposable
         _conn.On<CharacterDto>(Ev.CharacterUpdated,        c => Fire(() => _store.ApplyCharacter(c)));
         _conn.On<string, string>(Ev.CharacterRemoved, (code, eid) => Fire(() => _store.RemoveCharacter(code, eid)));
         _conn.On<TemplateDto>(Ev.TemplateUpdated,          t => Fire(() => _store.ApplyTemplate(t)));
-        _conn.On<InitiativeStateDto>(Ev.InitiativeUpdated, i => Fire(() => _store.ApplyInitiative(i)));
-        _conn.On<string>(Ev.InitiativeEnded,            code => Fire(() => _store.RemoveInitiative(code)));
+        _conn.On<EncounterDto>(Ev.EncounterUpdated,        e => Fire(() => _store.ApplyEncounter(e)));
+        _conn.On<string, string>(Ev.EncounterRemoved, (code, encId) => Fire(() => _store.RemoveEncounter(encId)));
         _conn.On<BagDto>(Ev.BagUpdated,                    b => Fire(() => _store.ApplyBag(b)));
         _conn.On<Guid>(Ev.BagRemoved,                     id => Fire(() => _store.RemoveBag(id)));
         _conn.On<RoomStateDto>(Ev.RoomUpdated,             r => Fire(() => _store.ApplyRoom(r)));
@@ -161,18 +163,24 @@ public sealed class NetworkService : IDisposable
     public Task EntityCreate(string code, EntityKind kind, string name) => SafeInvoke(In.EntityCreate, code, kind, name);
     public Task EntityRename(string code, string entityId, string name) => SafeInvoke(In.EntityRename, code, entityId, name);
     public Task EntityDelete(string code, string entityId)              => SafeInvoke(In.EntityDelete, code, entityId);
+    public Task EntityImport(string code, string exportCode, EntityKind kind) => SafeInvoke(In.EntityImport, code, exportCode, kind);
 
     // Dice
     public Task RollDice(string code, string entityId, int die, RollMode mode, string? statFieldId, string? specFieldId)
         => SafeInvoke(In.RollDice, code, entityId, die, mode, statFieldId, specFieldId);
 
-    // Initiative
-    public Task InitiativeStart(string code)     => SafeInvoke(In.InitiativeStart, code);
-    public Task InitiativeEndTurn(string code)   => SafeInvoke(In.InitiativeEndTurn, code);
-    public Task InitiativeEndCombat(string code) => SafeInvoke(In.InitiativeEndCombat, code);
-    public Task InitiativeAddNpc(string code, string name, int roll, int bonus, int hp, int ap)
-        => SafeInvoke(In.InitiativeAddNpc, code, name, roll, bonus, hp, ap);
-    public Task InitiativeRemove(string code, string entryId) => SafeInvoke(In.InitiativeRemove, code, entryId);
+    // Initiative encounters (joinable, multiple per campaign)
+    public Task EncounterCreate(string code, string name)              => SafeInvoke(In.EncounterCreate, code, name);
+    public Task EncounterDelete(string code, string encounterId)       => SafeInvoke(In.EncounterDelete, code, encounterId);
+    public Task EncounterJoin(string code, string encounterId)         => SafeInvoke(In.EncounterJoin, code, encounterId);
+    public Task EncounterLeave(string code, string encounterId)        => SafeInvoke(In.EncounterLeave, code, encounterId);
+    public Task EncounterAddEntity(string code, string encounterId, string entityId)
+        => SafeInvoke(In.EncounterAddEntity, code, encounterId, entityId);
+    public Task EncounterAddNpc(string code, string encounterId, string name, int roll, int bonus, int hp, int ap)
+        => SafeInvoke(In.EncounterAddNpc, code, encounterId, name, roll, bonus, hp, ap);
+    public Task EncounterRemove(string code, string encounterId, string entityId)
+        => SafeInvoke(In.EncounterRemove, code, encounterId, entityId);
+    public Task EncounterEndTurn(string code, string encounterId)      => SafeInvoke(In.EncounterEndTurn, code, encounterId);
 
     // Inventory + trading
     public Task BagCreate(string code, string name, bool isDmBag) => SafeInvoke(In.BagCreate, code, name, isDmBag);
@@ -210,6 +218,29 @@ public sealed class NetworkService : IDisposable
     public Task PlaylistAdd(string code, string title, string url)       => SafeInvoke(In.PlaylistAdd, code, title, url);
     public Task PlaylistRemove(string code, Guid songId)               => SafeInvoke(In.PlaylistRemove, code, songId);
     public Task PlaybackCommand(string code, PlaybackCommandDto cmd)    => SafeInvoke(In.PlaybackCommand, code, cmd);
+    public Task BgmReady(string code, int songIndex, long version)     => SafeInvoke(In.BgmReady, code, songIndex, version);
+    public Task BgmSetActive(string code)                              => SafeInvoke(In.BgmSetActive, code);
+
+    /// <summary>
+    /// Asks the server to prepare (yt-dlp + ffmpeg -> PCM WAV) and sign a download URL for a YouTube
+    /// video id. Returns a fully-qualified, short-lived URL the client can HTTP-GET, or null if the
+    /// server declined / we're offline. The server returns a path relative to its origin; we prepend
+    /// the connected base URL so the audio fetch hits the same host.
+    /// </summary>
+    public async Task<string?> ResolveBgmAudio(string videoId)
+    {
+        if (_conn == null || _conn.State != HubConnectionState.Connected) return null;
+        try
+        {
+            var rel = await _conn.InvokeAsync<string?>(In.ResolveBgmAudio, videoId);
+            if (string.IsNullOrEmpty(rel)) return null;
+            if (rel.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+                rel.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                return rel;
+            return _baseUrl + (rel.StartsWith('/') ? rel : "/" + rel);
+        }
+        catch (Exception ex) { Plugin.Log.Warning(ex, "[Net] ResolveBgmAudio failed."); return null; }
+    }
 
     // ═════════════════════════════════════════════════════════════════════════
     // Helpers

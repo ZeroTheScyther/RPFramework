@@ -30,6 +30,11 @@ public class RpNpcWindow : Window, IDisposable
     private string _nameBuf      = "";   // rename buffer, reseeded when the selection changes
     private string _nameForId    = "";
     private string? _pendingDelete;
+    private string _importCode   = "";   // paste-buffer for importing a companion from an export code
+    private bool   _importAsNpc;          // DM-only: import target kind (Companion vs NPC)
+    private bool   _importPendingOpen;    // deferred open for the import modal
+    private DateTime _exportMsgUntil;     // brief "Copied!" confirmation timer
+    private string   _exportMsgId = "";   // entity the confirmation belongs to
 
     public RpNpcWindow(Plugin plugin) : base("RPNPC Vault##RPFramework.Npc",
         ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse)
@@ -71,6 +76,7 @@ public class RpNpcWindow : Window, IDisposable
         if (right) DrawSelected(code, scale);
 
         DrawDeleteConfirm(code);
+        DrawImportModal(code, scale);
     }
 
     // ── Left: roster ─────────────────────────────────────────────────────────
@@ -81,38 +87,56 @@ public class RpNpcWindow : Window, IDisposable
         bool   isDm  = _plugin.IsDm(code);
         var    activeId = _plugin.ActiveCompanion(code)?.EntityId;
 
-        ImGui.TextDisabled("Companions");
-        ImGui.Separator();
-        foreach (var c in _plugin.Store.CompanionsOf(code, pid).OrderBy(c => c.DisplayName))
-            DrawRosterRow(c, c.EntityId == activeId);
-
-        ImGui.Spacing();
-        ImGui.SetNextItemWidth(-1);
-        ImGui.InputTextWithHint("##newcomp", "New companion name", ref _newCompanion, 64);
-        using (ImRaii.Disabled(string.IsNullOrWhiteSpace(_newCompanion)))
-            if (ImGui.Button("Create Companion##npc_addcomp", new Vector2(-1, 0)))
+        // Reserve room for the pinned Import button (separator + a full-width button row).
+        float footer = ImGui.GetFrameHeightWithSpacing() + ImGui.GetStyle().ItemSpacing.Y * 2;
+        using (var list = ImRaii.Child("##npcrosterlist", new Vector2(0, -footer), false))
+        {
+            if (list)
             {
-                _ = _plugin.Network.EntityCreate(code, EntityKind.Companion, _newCompanion.Trim());
-                _newCompanion = "";
+                ImGui.TextDisabled("Companions");
+                ImGui.Separator();
+                foreach (var c in _plugin.Store.CompanionsOf(code, pid).OrderBy(c => c.DisplayName))
+                    DrawRosterRow(c, c.EntityId == activeId);
+
+                ImGui.Spacing();
+                ImGui.SetNextItemWidth(-1);
+                ImGui.InputTextWithHint("##newcomp", "New companion name", ref _newCompanion, 64);
+                using (ImRaii.Disabled(string.IsNullOrWhiteSpace(_newCompanion)))
+                    if (ImGui.Button("Create Companion##npc_addcomp", new Vector2(-1, 0)))
+                    {
+                        _ = _plugin.Network.EntityCreate(code, EntityKind.Companion, _newCompanion.Trim());
+                        _newCompanion = "";
+                    }
+
+                if (isDm)
+                {
+                    ImGuiHelpers.ScaledDummy(8f);
+                    ImGui.TextDisabled("NPCs (DM)");
+                    ImGui.Separator();
+                    foreach (var n in _plugin.Store.NpcsIn(code).OrderBy(n => n.DisplayName))
+                        DrawRosterRow(n, false);
+
+                    ImGui.Spacing();
+                    ImGui.SetNextItemWidth(-1);
+                    ImGui.InputTextWithHint("##newnpc", "New NPC name", ref _newNpc, 64);
+                    using (ImRaii.Disabled(string.IsNullOrWhiteSpace(_newNpc)))
+                        if (ImGui.Button("Create NPC##npc_addnpc", new Vector2(-1, 0)))
+                        {
+                            _ = _plugin.Network.EntityCreate(code, EntityKind.Npc, _newNpc.Trim());
+                            _newNpc = "";
+                        }
+                }
             }
+        }
 
-        if (!isDm) return;
-
-        ImGuiHelpers.ScaledDummy(8f);
-        ImGui.TextDisabled("NPCs (DM)");
+        // Pinned at the bottom of the left panel: open the import modal.
         ImGui.Separator();
-        foreach (var n in _plugin.Store.NpcsIn(code).OrderBy(n => n.DisplayName))
-            DrawRosterRow(n, false);
-
-        ImGui.Spacing();
-        ImGui.SetNextItemWidth(-1);
-        ImGui.InputTextWithHint("##newnpc", "New NPC name", ref _newNpc, 64);
-        using (ImRaii.Disabled(string.IsNullOrWhiteSpace(_newNpc)))
-            if (ImGui.Button("Create NPC##npc_addnpc", new Vector2(-1, 0)))
-            {
-                _ = _plugin.Network.EntityCreate(code, EntityKind.Npc, _newNpc.Trim());
-                _newNpc = "";
-            }
+        if (ImGui.Button("Import##npc_import_open", new Vector2(-1, 0)))
+        {
+            _importCode        = "";
+            _importAsNpc       = false;
+            _importPendingOpen = true;
+        }
     }
 
     private void DrawRosterRow(CharacterDto e, bool active)
@@ -163,6 +187,21 @@ public class RpNpcWindow : Window, IDisposable
                 ImGui.SameLine();
                 if (ImGui.Button("Set Active##npc_active")) _plugin.SetActiveCompanion(code, entity.EntityId);
             }
+        }
+
+        // Export this entity as a shareable code (copied to clipboard) for import into another vault.
+        ImGui.SameLine();
+        if (ImGui.SmallButton("Export##npc_export"))
+        {
+            ImGui.SetClipboardText(CompanionCodec.Encode(entity.DisplayName, entity.State));
+            _exportMsgUntil = DateTime.Now.AddSeconds(2.5);
+            _exportMsgId    = entity.EntityId;
+        }
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Copy a shareable code for this character to the clipboard.");
+        if (_exportMsgId == entity.EntityId && DateTime.Now < _exportMsgUntil)
+        {
+            ImGui.SameLine();
+            ImGui.TextColored(new Vector4(0.45f, 0.85f, 0.45f, 1f), "Copied!");
         }
 
         ImGui.SameLine();
@@ -217,6 +256,56 @@ public class RpNpcWindow : Window, IDisposable
         }
         ImGui.SameLine();
         if (ImGui.Button("Cancel##npc_delno", new Vector2(bw, 0))) { _pendingDelete = null; ImGui.CloseCurrentPopup(); }
+        ImGui.EndPopup();
+    }
+
+    // ── Import modal ─────────────────────────────────────────────────────────
+
+    /// <summary>Paste a character code and import it. Players always import as their own companion;
+    /// DMs may pick Companion vs NPC. Opened by the Import button pinned under the roster.</summary>
+    private void DrawImportModal(string code, float scale)
+    {
+        if (_importPendingOpen) { ImGui.OpenPopup("##npc_import"); _importPendingOpen = false; }
+
+        ImGui.SetNextWindowSize(new Vector2(360 * scale, 0), ImGuiCond.Always);
+        bool open = true;
+        if (!ImGui.BeginPopupModal("##npc_import", ref open, ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoResize)) return;
+
+        ImGui.TextUnformatted("Import Character");
+        ImGui.Separator(); ImGui.Spacing();
+
+        ImGui.TextUnformatted("Paste character code:");
+        ImGui.SetNextItemWidth(-1);
+        ImGui.InputTextWithHint("##importcode", "RPNPC1:...", ref _importCode, 16384);
+
+        var importKind = EntityKind.Companion;
+        if (_plugin.IsDm(code))
+        {
+            ImGui.Spacing();
+            int sel = _importAsNpc ? 1 : 0;
+            if (ImGui.RadioButton("As Companion##imp_kc", ref sel, 0)) _importAsNpc = false;
+            ImGui.SameLine();
+            if (ImGui.RadioButton("As NPC##imp_kn", ref sel, 1)) _importAsNpc = true;
+            importKind = _importAsNpc ? EntityKind.Npc : EntityKind.Companion;
+        }
+
+        bool validImport = CompanionCodec.TryDecode(_importCode, out var preview);
+        if (_importCode.Length > 0 && !validImport)
+            ImGui.TextColored(new Vector4(0.85f, 0.45f, 0.45f, 1f), "Not a valid character code.");
+        else if (validImport)
+            ImGui.TextDisabled($"Will import \"{preview.DisplayName}\".");
+
+        ImGui.Spacing();
+        float bw = 100 * scale;
+        using (ImRaii.Disabled(!validImport))
+            if (ImGui.Button("Import##npc_import_do", new Vector2(bw, 0)))
+            {
+                _ = _plugin.Network.EntityImport(code, _importCode.Trim(), importKind);
+                _importCode = "";
+                ImGui.CloseCurrentPopup();
+            }
+        ImGui.SameLine();
+        if (ImGui.Button("Cancel##npc_import_cancel", new Vector2(bw, 0))) { _importCode = ""; ImGui.CloseCurrentPopup(); }
         ImGui.EndPopup();
     }
 }

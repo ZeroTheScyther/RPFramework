@@ -18,7 +18,7 @@ public class Configuration : IPluginConfiguration
     public int Version { get; set; } = 1;
 
     /// <summary>Relay server URL.</summary>
-    public string ServerUrl { get; set; } = "https://rpframework.example.com";
+    public string ServerUrl { get; set; } = "https://rpframework.fantasy-tales.uk";
 
     /// <summary>
     /// Per-install random secret that binds this player identity to this client on the server,

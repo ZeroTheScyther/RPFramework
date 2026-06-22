@@ -1,10 +1,7 @@
 using System;
-using System.Diagnostics;
-using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
-using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -18,9 +15,10 @@ using YoutubeExplode.Videos;
 namespace RPFramework.Services;
 
 /// <summary>
-/// Handles audio playback for RPBGM.
-/// yt-dlp.exe is auto-downloaded once into the cache dir and used for all
-/// YouTube audio downloads. Audio files are cached locally; repeat plays are instant.
+/// Handles audio playback for RPBGM. The CLIENT no longer touches yt-dlp, ffmpeg, or any OS codec:
+/// the server prepares a PCM WAV for a video id and serves it over a short-lived HMAC-signed URL
+/// (resolved via <see cref="ResolveAudioUrl"/>). The client just HTTP-downloads that WAV into a local
+/// cache and plays it with NAudio's <see cref="WaveFileReader"/> (no codec dependency at all).
 /// YoutubeExplode is kept only for lightweight title/metadata fetching.
 /// </summary>
 public class BgmService : IDisposable
@@ -28,7 +26,7 @@ public class BgmService : IDisposable
     // Title-only metadata client (less likely to be blocked than stream extraction)
     private static readonly YoutubeClient Youtube = new();
 
-    // Shared HttpClient for downloading yt-dlp itself
+    // Shared HttpClient for downloading the server-prepared WAV
     private static readonly HttpClient Http = MakeHttp();
     private static HttpClient MakeHttp()
     {
@@ -38,9 +36,13 @@ public class BgmService : IDisposable
     }
 
     private readonly string cacheDir;
-    private readonly string ytDlpExe;   // <cacheDir>/yt-dlp.exe
 
-    private volatile bool ytDlpReady;   // true once yt-dlp.exe is confirmed present
+    /// <summary>
+    /// Resolves a YouTube video id to a fully-qualified, server-signed WAV download URL (set by Plugin
+    /// to <c>NetworkService.ResolveBgmAudio</c>). The server runs yt-dlp + ffmpeg and serves PCM WAV, so
+    /// the client needs no yt-dlp, no ffmpeg, and no OS audio codec. Null until wired / when offline.
+    /// </summary>
+    public Func<string, Task<string?>>? ResolveAudioUrl { get; set; }
 
     private WaveOutEvent?         outputDevice;
     private WaveStream?           audioStream;
@@ -54,6 +56,7 @@ public class BgmService : IDisposable
 
     private volatile bool  isLoading;
     private volatile bool  pendingAdvance;
+    private volatile bool  pendingTrackEnded;
     private volatile bool  pendingStopBroadcast;
     private          bool  isMuted;
     private          string? loadError;
@@ -62,11 +65,11 @@ public class BgmService : IDisposable
 
     private readonly object playLock = new();
 
-    // yt-dlp gets at most this long per download before being killed
+    // A WAV download (incl. server-side yt-dlp + ffmpeg transcode on a cold cache) gets at most this long.
     private static readonly TimeSpan DownloadTimeout = TimeSpan.FromMinutes(10);
 
     // YouTube video IDs: URL-safe base64-ish, ~11 chars. Anything else never reaches
-    // the filesystem path or the yt-dlp command line.
+    // the filesystem path or the resolve call.
     private static readonly Regex VideoIdPattern = new(@"^[A-Za-z0-9_-]{6,16}$", RegexOptions.Compiled);
 
     /// <summary>
@@ -117,13 +120,13 @@ public class BgmService : IDisposable
     public float   DownloadProgress      => downloadProgress;
     /// <summary>Set when the last song in the playlist ends with no loop. Cleared by the caller after broadcasting.</summary>
     public bool    PendingStopBroadcast  { get => pendingStopBroadcast; set => pendingStopBroadcast = value; }
+    /// <summary>Set when a track finishes playing naturally (not a manual stop/song-change). The coordinator (controller) consumes it to drive the next gated song.</summary>
+    public bool    PendingTrackEnded     { get => pendingTrackEnded; set => pendingTrackEnded = value; }
 
     public BgmService(string cacheDir)
     {
         this.cacheDir = cacheDir;
-        this.ytDlpExe = Path.Combine(cacheDir, "yt-dlp.exe");
         Directory.CreateDirectory(cacheDir);
-        ytDlpReady = File.Exists(ytDlpExe);
     }
 
     // ── Called from Framework.Update (game thread) ────────────────────────────
@@ -181,16 +184,20 @@ public class BgmService : IDisposable
         currentSongIndex = -1;
     }
 
+    // The slider runs 0–100%, but full-scale PCM is painfully loud, so cap the actual output gain here.
+    // 100% on the slider => this gain. Halving it tamed the "that shit is LOUD" problem.
+    private const float MaxGain = 0.5f;
+
     public void SetVolume(float vol)
     {
         volume = Math.Clamp(vol, 0f, 1f);
-        if (volumeProvider != null) volumeProvider.Volume = isMuted ? 0f : volume;
+        if (volumeProvider != null) volumeProvider.Volume = isMuted ? 0f : volume * MaxGain;
     }
 
     public void ToggleMute()
     {
         isMuted = !isMuted;
-        if (volumeProvider != null) volumeProvider.Volume = isMuted ? 0f : volume;
+        if (volumeProvider != null) volumeProvider.Volume = isMuted ? 0f : volume * MaxGain;
     }
 
     /// <summary>Current playback position in seconds. Used by the owner to report position to the server.</summary>
@@ -233,6 +240,7 @@ public class BgmService : IDisposable
         StopPlayback();
 
         string url = playlist[index].YoutubeUrl;
+        Plugin.Log.Debug("[BGM] loading idx={0} room={1} (autoAdvance={2})", index, currentRoomCode ?? "", AutoAdvance);
         Task.Run(async () => await LoadAndPlayAsync(url));
     }
 
@@ -242,35 +250,26 @@ public class BgmService : IDisposable
         downloadCts = cts;
         try
         {
-            // 1. Make sure yt-dlp.exe is present (auto-download if missing)
-            if (!ytDlpReady)
-            {
-                if (!await EnsureYtDlpAsync(cts.Token))
-                {
-                    loadError = "Could not obtain yt-dlp. Check your internet connection.";
-                    return;
-                }
-            }
-            if (cts.IsCancellationRequested) return;
-
-            // 2. Download audio to cache (or load from cache)
+            // 1. Fetch the server-prepared WAV into cache (or load from cache)
             string? filePath = await GetOrDownloadAsync(youtubeUrl, cts.Token);
             if (cts.IsCancellationRequested) return;
 
             if (filePath == null)
             {
-                loadError = "Could not download audio. The video may be unavailable or region-locked.";
+                if (loadError == null)
+                    loadError = "Could not get audio from the server. The video may be unavailable or region-locked.";
                 return;
             }
 
-            // 3. Open and play
+            // 2. Open and play. WaveFileReader decodes PCM WAV with zero OS codec dependency,
+            //    so playback is identical on Windows and Linux/Wine.
             lock (playLock)
             {
                 try
                 {
-                    var stream  = new MediaFoundationReader(filePath);
+                    var stream  = new WaveFileReader(filePath);
                     var volProv = new VolumeSampleProvider(stream.ToSampleProvider())
-                        { Volume = isMuted ? 0f : volume };
+                        { Volume = isMuted ? 0f : volume * MaxGain };
                     var device  = new WaveOutEvent();
                     device.Init(volProv);
                     device.PlaybackStopped += OnPlaybackStopped;
@@ -278,8 +277,9 @@ public class BgmService : IDisposable
                     audioStream    = stream;
                     volumeProvider = volProv;
                     outputDevice   = device;
+                    Plugin.Log.Debug("[BGM] playback started: room={0} idx={1}", currentRoomCode ?? "", currentSongIndex);
                 }
-                catch (Exception ex) { loadError = $"Playback error: {ex.Message}"; }
+                catch (Exception ex) { loadError = $"Playback error: {ex.Message}"; Plugin.Log.Warning(ex, "[BGM] open/play failed"); }
             }
         }
         catch (OperationCanceledException) { /* song changed — expected */ }
@@ -294,6 +294,21 @@ public class BgmService : IDisposable
 
     private void OnPlaybackStopped(object? sender, StoppedEventArgs e)
     {
+        // NAudio reports the real reason a device stopped here, and we used to swallow it. A device that
+        // dies the instant after Play() (no audio, button stuck on "Play") shows up as either an
+        // exception (decode/output failure) or an immediate end-of-stream (pos≈0 / pos≈len on a
+        // zero-length file). Surface both so a single repro pinpoints the cause.
+        if (e.Exception != null)
+            Plugin.Log.Warning(e.Exception, "[BGM] playback stopped with error");
+        else
+        {
+            double pos, len;
+            lock (playLock) { pos = audioStream?.CurrentTime.TotalSeconds ?? -1; len = audioStream?.TotalTime.TotalSeconds ?? -1; }
+            Plugin.Log.Debug("[BGM] playback stopped (pos={0:0.0}s len={1:0.0}s isLoading={2})", pos, len, isLoading);
+            // A clean end-of-track (no exception, not a deliberate stop — those detach this handler first):
+            // signal the coordinator so the controller can advance the room to the next gated song.
+            if (!isLoading) pendingTrackEnded = true;
+        }
         if (!isLoading) pendingAdvance = true;
     }
 
@@ -337,137 +352,115 @@ public class BgmService : IDisposable
 
     public void Dispose() => StopPlayback();
 
-    // ── yt-dlp bootstrap ──────────────────────────────────────────────────────
-
-    /// <summary>
-    /// Downloads yt-dlp.exe from the latest GitHub release into the cache dir.
-    /// This is a one-time operation; subsequent calls return immediately.
-    /// </summary>
-    private async Task<bool> EnsureYtDlpAsync(CancellationToken ct)
-    {
-        if (File.Exists(ytDlpExe)) { ytDlpReady = true; return true; }
-
-        loadError        = "First-time setup: fetching yt-dlp info...";
-        downloadProgress = 0f;
-
-        try
-        {
-            // Ask GitHub for the latest release metadata
-            var json = await Http.GetStringAsync(
-                "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest", ct);
-
-            string? downloadUrl = null;
-            using (var doc = JsonDocument.Parse(json))
-            {
-                foreach (var asset in doc.RootElement.GetProperty("assets").EnumerateArray())
-                {
-                    if (asset.GetProperty("name").GetString() == "yt-dlp.exe")
-                    {
-                        downloadUrl = asset.GetProperty("browser_download_url").GetString();
-                        break;
-                    }
-                }
-            }
-            if (downloadUrl == null) { loadError = "Could not find yt-dlp.exe in GitHub release."; return false; }
-
-            loadError = "First-time setup: downloading yt-dlp.exe (~20 MB)...";
-            var bytes = await Http.GetByteArrayAsync(downloadUrl, ct);
-            await File.WriteAllBytesAsync(ytDlpExe, bytes, ct);
-
-            ytDlpReady = true;
-            loadError  = null;
-            return true;
-        }
-        catch (OperationCanceledException) { throw; }
-        catch (Exception ex)
-        {
-            loadError = $"yt-dlp setup failed: {ex.Message}";
-            return false;
-        }
-    }
-
     // ── Audio cache ───────────────────────────────────────────────────────────
 
-    private static readonly string[] AudioExts = { ".m4a", ".webm", ".mp3", ".mp4", ".opus" };
+    // The server only ever serves PCM WAV, so the client cache is WAV-only. (Any leftover .m4a/.webm
+    // from the old client-side yt-dlp era is simply ignored and re-fetched as .wav.)
+    private static readonly string[] AudioExts = { ".wav" };
 
     private async Task<string?> GetOrDownloadAsync(string youtubeUrl, CancellationToken ct)
     {
         try
         {
-            // Whitelist + ID-shape validation — nothing else reaches yt-dlp or the cache path
+            // Whitelist + ID-shape validation — nothing else reaches the resolve call or the cache path
             string? videoId = TryGetVideoId(youtubeUrl);
             if (videoId == null)
             {
                 loadError = "Only youtube.com / youtu.be links are supported.";
                 return null;
             }
-            string cacheBase = Path.Combine(cacheDir, videoId);
+            string cachePath = Path.Combine(cacheDir, videoId + ".wav");
 
             // Return cached file if present
-            foreach (string ext in AudioExts)
-            {
-                string cached = cacheBase + ext;
-                if (File.Exists(cached)) { downloadProgress = 1f; return cached; }
-            }
+            if (File.Exists(cachePath)) { downloadProgress = 1f; return cachePath; }
 
-            // Download with yt-dlp; output template keeps video ID as filename.
-            // --max-filesize caps disk usage per track; "--" stops option parsing
-            // so the (already validated) ID can never be read as a flag.
-            string outTemplate = cacheBase + ".%(ext)s";
-            var psi = new ProcessStartInfo
+            // Ask the server (over the hub) for a signed, fully-qualified WAV URL. The server runs
+            // yt-dlp + ffmpeg and transcodes to PCM WAV; we never touch either tool locally.
+            if (ResolveAudioUrl == null)
             {
-                FileName               = ytDlpExe,
-                // Prefer m4a (plays well with MediaFoundationReader); fall back to best audio
-                Arguments              = $"--no-playlist --max-filesize 200M -f \"bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio\" --no-part -o \"{outTemplate}\" -- \"{videoId}\"",
-                RedirectStandardOutput = true,
-                RedirectStandardError  = true,
-                UseShellExecute        = false,
-                CreateNoWindow         = true,
-            };
-
-            using var proc = new Process { StartInfo = psi, EnableRaisingEvents = true };
-
-            // Parse yt-dlp's "[download]  42.3% of …" progress lines
-            proc.OutputDataReceived += (_, e) =>
-            {
-                if (e.Data is not { } line) return;
-                int pctIdx = line.IndexOf('%');
-                if (pctIdx <= 0) return;
-                int start = line.LastIndexOf(' ', pctIdx - 1) + 1;
-                if (float.TryParse(line[start..pctIdx],
-                        NumberStyles.Float, CultureInfo.InvariantCulture, out float pct))
-                    downloadProgress = pct / 100f;
-            };
-
-            proc.Start();
-            proc.BeginOutputReadLine();
-
-            // Hard timeout so a hung yt-dlp can't linger forever
-            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            timeoutCts.CancelAfter(DownloadTimeout);
-            try
-            {
-                await proc.WaitForExitAsync(timeoutCts.Token);
-            }
-            catch (OperationCanceledException)
-            {
-                try { proc.Kill(entireProcessTree: true); } catch { }
-                if (ct.IsCancellationRequested) throw;   // song changed — propagate
-                loadError = "Download timed out.";
+                loadError = "Not connected to the server, so audio can't be fetched.";
                 return null;
             }
 
-            if (proc.ExitCode != 0) return null;
-
-            foreach (string ext in AudioExts)
+            string? audioUrl = await ResolveAudioUrl(videoId);
+            if (ct.IsCancellationRequested) throw new OperationCanceledException();
+            if (string.IsNullOrEmpty(audioUrl))
             {
-                string downloaded = cacheBase + ext;
-                if (File.Exists(downloaded)) { downloadProgress = 1f; return downloaded; }
+                loadError = "The server could not prepare audio for this video.";
+                return null;
             }
-            return null;
+
+            // Stream the WAV to a temp file, then atomically move into place so a cancelled/failed
+            // download never leaves a half-written cache entry that later plays as garbage.
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeoutCts.CancelAfter(DownloadTimeout);
+            var dlCt = timeoutCts.Token;
+
+            string tmpPath = cachePath + ".part";
+            try
+            {
+                using (var resp = await Http.GetAsync(audioUrl, HttpCompletionOption.ResponseHeadersRead, dlCt))
+                {
+                    if (!resp.IsSuccessStatusCode)
+                    {
+                        Plugin.Log.Warning("[BGM] server WAV fetch failed {0} for {1}", (int)resp.StatusCode, videoId);
+                        loadError = resp.StatusCode == System.Net.HttpStatusCode.NotFound
+                            ? "The server could not prepare audio for this video."
+                            : $"Audio fetch failed ({(int)resp.StatusCode}).";
+                        return null;
+                    }
+
+                    long? total = resp.Content.Headers.ContentLength;
+                    await using var src = await resp.Content.ReadAsStreamAsync(dlCt);
+                    await using (var dst = new FileStream(tmpPath, FileMode.Create, FileAccess.Write, FileShare.None))
+                    {
+                        var buf = new byte[81920];
+                        long read = 0;
+                        int n;
+                        while ((n = await src.ReadAsync(buf, dlCt)) > 0)
+                        {
+                            await dst.WriteAsync(buf.AsMemory(0, n), dlCt);
+                            read += n;
+                            if (total is > 0) downloadProgress = Math.Clamp((float)read / total.Value, 0f, 1f);
+                        }
+                    }
+                }
+
+                File.Move(tmpPath, cachePath, overwrite: true);
+                downloadProgress = 1f;
+                return cachePath;
+            }
+            catch (OperationCanceledException)
+            {
+                TryDelete(tmpPath);
+                if (ct.IsCancellationRequested) throw;   // song changed — propagate
+                loadError = "Audio download timed out.";
+                return null;
+            }
+            catch
+            {
+                TryDelete(tmpPath);
+                throw;
+            }
         }
         catch (OperationCanceledException) { throw; }
-        catch { return null; }
+        catch (Exception ex) { Plugin.Log.Warning(ex, "[BGM] download failed"); return null; }
+    }
+
+    private static void TryDelete(string path)
+    {
+        try { if (File.Exists(path)) File.Delete(path); } catch { }
+    }
+
+    /// <summary>
+    /// Ensures the server-prepared WAV for a YouTube url is downloaded into the local cache, WITHOUT
+    /// starting playback. Used by the "waiting for members" prepare gate so every client can ready the
+    /// cued song before anyone presses play. Returns true when the file is locally available.
+    /// </summary>
+    public async Task<bool> EnsureCachedAsync(string youtubeUrl, CancellationToken ct)
+    {
+        var path = await GetOrDownloadAsync(youtubeUrl, ct);
+        return path != null;
     }
 
     // ── Title fetch (used by add-song modal) ──────────────────────────────────
@@ -499,13 +492,13 @@ public class BgmService : IDisposable
 
     public long GetCacheSizeBytes()
     {
-        try { return Directory.GetFiles(cacheDir).Where(f => !f.EndsWith("yt-dlp.exe")).Sum(f => new FileInfo(f).Length); }
+        try { return Directory.GetFiles(cacheDir).Sum(f => new FileInfo(f).Length); }
         catch { return 0; }
     }
 
     public void ClearCache()
     {
-        try { foreach (var f in Directory.GetFiles(cacheDir).Where(f => !f.EndsWith("yt-dlp.exe"))) File.Delete(f); }
+        try { foreach (var f in Directory.GetFiles(cacheDir)) File.Delete(f); }
         catch { }
     }
 }
