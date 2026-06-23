@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using RPFramework.Contracts;
@@ -27,8 +29,15 @@ public class SessionManager
     private readonly ConcurrentDictionary<string, string>          _activeRoom   = new(); // connId  → BGM room code this connection is actively listening to
     private readonly ConcurrentDictionary<string, Encounter>      _encounters  = new();  // encounterId → encounter
     private readonly ConcurrentDictionary<Guid, TradeOffer>        _trades      = new();
-    private readonly ConcurrentDictionary<string, SemaphoreSlim>   _locks       = new();  // per-campaign write lock
     private readonly ConcurrentDictionary<string, PrepareGate>     _gates       = new();  // room code → in-flight "waiting for members" gate
+
+    // Striped write-lock pool. A per-key dictionary keyed by client-supplied code/bagId would grow
+    // unbounded (a SemaphoreSlim per distinct key) under sprayed input — a slow memory-exhaustion DoS.
+    // A fixed array keyed by the key's hash bounds memory; distinct keys may occasionally share a lock
+    // (harmless false contention), but a key always maps to the same stripe so mutual exclusion holds.
+    private const int LockStripes = 256;
+    private readonly SemaphoreSlim[] _locks =
+        Enumerable.Range(0, LockStripes).Select(_ => new SemaphoreSlim(1, 1)).ToArray();
 
     public SessionManager(IDbContextFactory<AppDbContext> dbFactory, RollService rolls, ILogger<SessionManager> log)
     {
@@ -37,7 +46,8 @@ public class SessionManager
         _log       = log;
     }
 
-    private SemaphoreSlim LockFor(string key) => _locks.GetOrAdd(key, _ => new SemaphoreSlim(1, 1));
+    private SemaphoreSlim LockFor(string key)
+        => _locks[(uint)StringComparer.Ordinal.GetHashCode(key ?? "") % LockStripes];
 
     // ═════════════════════════════════════════════════════════════════════════
     // Presence
@@ -101,18 +111,28 @@ public class SessionManager
     /// </summary>
     public async Task<bool> AuthenticateAsync(string playerId, string secret, string displayName)
     {
+        secret ??= "";
         await using var db = await _dbFactory.CreateDbContextAsync();
         var player = await db.Players.FindAsync(playerId);
         if (player == null)
         {
-            db.Players.Add(new PlayerEntity { PlayerId = playerId, Secret = secret, DisplayName = displayName });
+            // First registration: store the secret hashed at rest (a DB leak then exposes no usable secrets).
+            db.Players.Add(new PlayerEntity { PlayerId = playerId, Secret = InputSanitizer.HashPassword(secret), DisplayName = displayName });
             await db.SaveChangesAsync();
             return true;
         }
-        if (!string.IsNullOrEmpty(player.Secret) && player.Secret != secret)
-            return false;
 
-        player.Secret      = secret; // adopt secret if previously empty
+        if (!string.IsNullOrEmpty(player.Secret))
+        {
+            bool ok = player.Secret.StartsWith("v2:", StringComparison.Ordinal)
+                ? InputSanitizer.VerifyPassword(secret, player.Secret)
+                // Legacy plaintext secret stored before hashing-at-rest: constant-time compare, then upgrade.
+                : CryptographicOperations.FixedTimeEquals(
+                    Encoding.UTF8.GetBytes(player.Secret), Encoding.UTF8.GetBytes(secret));
+            if (!ok) return false;
+        }
+
+        player.Secret      = InputSanitizer.HashPassword(secret); // (re)hash; adopts secret if previously empty
         player.DisplayName = displayName;
         await db.SaveChangesAsync();
         return true;
@@ -303,6 +323,8 @@ public class SessionManager
     {
         await using var db = await _dbFactory.CreateDbContextAsync();
         if (await db.Campaigns.CountAsync() >= Limits.TotalParties) return null;
+        // Per-owner cap: one identity must not be able to fill the global table by itself.
+        if (await db.Campaigns.CountAsync(c => c.OwnerPlayerId == playerId) >= Limits.PartiesPerPlayer) return null;
 
         string code = NewCode();
         var template = SheetTemplate.Default();
@@ -602,7 +624,6 @@ public class SessionManager
     public async Task<CharacterDto?> ImportEntityAsync(string code, string callerId, string exportCode, EntityKind kind)
     {
         if (kind == EntityKind.PlayerCharacter) return null;
-        if (!CompanionCodec.TryDecode(exportCode, out var export)) return null;
 
         var gate = LockFor(code);
         await gate.WaitAsync();
@@ -612,6 +633,10 @@ public class SessionManager
             if (await db.CampaignMembers.FindAsync(code, callerId) == null) return null;   // must be a member
             bool isDm = await IsDmAsync(db, code, callerId);
             if (kind == EntityKind.Npc && !isDm) return null;                              // only DMs make NPCs
+
+            // Decode only after authorization — keeps the (bounded) decompression cost behind the
+            // membership/role gate so an unaffiliated connection can't trigger it.
+            if (!CompanionCodec.TryDecode(exportCode, out var export)) return null;
 
             int existing = kind == EntityKind.Companion
                 ? await db.Characters.CountAsync(c => c.CampaignCode == code && c.Kind == EntityKind.Companion && c.OwnerPlayerId == callerId)
@@ -1373,11 +1398,14 @@ public class SessionManager
     }
 
     /// <summary>Builds an invite payload (inviter must be a participant of the bag).</summary>
-    public async Task<BagShareInviteDto?> InviteToBagAsync(Guid bagId, string requesterId, string inviterDisplay)
+    public async Task<BagShareInviteDto?> InviteToBagAsync(Guid bagId, string requesterId, string inviterDisplay, string toPlayerId)
     {
         await using var db = await _dbFactory.CreateDbContextAsync();
         var bag = await db.Bags.FindAsync(bagId);
         if (bag == null || !ParticipantsOf(bag).Contains(requesterId)) return null;
+        // Only invite players who belong to the bag's campaign — otherwise any online player can be
+        // spammed with unsolicited invite popups (TradeOffer already enforces the same gate).
+        if (!await db.CampaignMembers.AnyAsync(m => m.Code == bag.CampaignCode && m.PlayerId == toPlayerId)) return null;
         return new BagShareInviteDto(bagId, requesterId, inviterDisplay, bag.Name);
     }
 
@@ -1678,6 +1706,8 @@ public class SessionManager
     {
         await using var db = await _dbFactory.CreateDbContextAsync();
         if (await db.BgmRooms.CountAsync() >= Limits.TotalRooms) return null;
+        // Per-owner cap: one identity must not be able to fill the global room table by itself.
+        if (await db.BgmRooms.CountAsync(r => r.OwnerPlayerId == playerId) >= Limits.RoomsPerPlayer) return null;
 
         // A campaign-scoped room requires the creator to be a member of that campaign.
         string campaign = "";
@@ -1838,7 +1868,10 @@ public class SessionManager
                 room.IsPlaying    = true;            // keep PositionSecs (where we paused); LastTimestampMs reset below
                 break;
             case PlaybackCommandType.Seek:
-                room.PositionSecs = cmd.PositionSeconds;
+                // Reject non-finite (NaN/Infinity): System.Text.Json throws on those, so persisting one
+                // would brick every later BuildRoomDtoAsync (incl. members' Identify snapshot). Clamp >= 0.
+                if (!double.IsFinite(cmd.PositionSeconds)) return null;
+                room.PositionSecs = Math.Max(0, cmd.PositionSeconds);
                 break;
             case PlaybackCommandType.Stop:
                 room.IsPlaying    = false;

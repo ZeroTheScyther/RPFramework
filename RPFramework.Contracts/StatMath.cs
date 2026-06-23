@@ -410,7 +410,9 @@ public static class StatMath
                 case FieldType.Number:
                 {
                     ch.StatValues.TryGetValue(baseId, out int numVal);
-                    ch.StatValues[baseId] = ApplyOp(fx, numVal, maxVal);
+                    // Clamp to a sane range so a repeated Multiply passive can't overflow the int and
+                    // corrupt the stat over many turns.
+                    ch.StatValues[baseId] = Math.Clamp(ApplyOp(fx, numVal, maxVal), -9_999_999, 9_999_999);
                     break;
                 }
                 case FieldType.Checkbox:

@@ -25,6 +25,7 @@ public static class Limits
     public const int TotalParties     = 10_000;
 
     public const int TotalRooms       = 2_000;
+    public const int RoomsPerPlayer   = 16;
     public const int MembersPerRoom   = 64;
     public const int PlaylistMax      = 200;
 
@@ -361,8 +362,15 @@ public static partial class InputSanitizer
 
     private const int Pbkdf2Iterations = 100_000;
 
+    /// <summary>Caps the password length before it ever reaches the (deliberately expensive) PBKDF2
+    /// derivation, so a giant client-supplied password can't be used for free CPU amplification. Applied
+    /// identically on hash and verify so a capped password still authenticates.</summary>
+    private static string CapPassword(string password)
+        => password.Length > Limits.PasswordMax ? password[..Limits.PasswordMax] : password;
+
     public static string HashPassword(string password)
     {
+        password = CapPassword(password ?? "");
         byte[] salt = RandomNumberGenerator.GetBytes(16);
         byte[] hash = Rfc2898DeriveBytes.Pbkdf2(
             Encoding.UTF8.GetBytes(password), salt, Pbkdf2Iterations, HashAlgorithmName.SHA256, 32);
@@ -372,6 +380,7 @@ public static partial class InputSanitizer
     public static bool VerifyPassword(string password, string stored)
     {
         if (string.IsNullOrEmpty(stored)) return false;
+        password = CapPassword(password ?? "");
 
         if (stored.StartsWith("v2:", StringComparison.Ordinal))
         {

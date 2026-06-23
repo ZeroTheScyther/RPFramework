@@ -401,7 +401,7 @@ public class RpHub : Hub
     public async Task BagShareInvite(Guid bagId, string toPlayerId)
     {
         var pid = RequirePid();
-        var invite = await _sessions.InviteToBagAsync(bagId, pid, Dn);
+        var invite = await _sessions.InviteToBagAsync(bagId, pid, Dn, toPlayerId);
         if (invite != null) await SendToPlayer(toPlayerId, Ev.BagShareInvited, invite);
     }
 

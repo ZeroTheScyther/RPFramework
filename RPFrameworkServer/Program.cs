@@ -30,6 +30,8 @@ builder.Services.AddSingleton<BgmAudioService>();
 
 // Periodic trade-offer cleanup
 builder.Services.AddHostedService<TradeCleanupService>();
+// Periodic BGM cache eviction (cold/stale tracks + global size ceiling).
+builder.Services.AddHostedService<BgmCacheSweepService>();
 // Drives the BGM "waiting for members" gates to a synchronized start (timeout / drop fallback).
 builder.Services.AddHostedService<BgmGateService>();
 
@@ -103,6 +105,23 @@ public class TradeCleanupService(SessionManager sessions) : BackgroundService
         {
             await Task.Delay(TimeSpan.FromSeconds(30), ct);
             sessions.PurgeStaleTrades();
+        }
+    }
+}
+
+// ── Hosted service: evict stale / over-ceiling BGM cache files every hour ─────
+// Download-time eviction handles active growth; this catches the cold case (a busy day fills the cache,
+// then nobody plays anything for a month - the stale TTL still reclaims it without any new download).
+
+public class BgmCacheSweepService(BgmAudioService audio) : BackgroundService
+{
+    protected override async Task ExecuteAsync(CancellationToken ct)
+    {
+        await audio.EnforceCacheLimitsAsync(); // once at startup
+        while (!ct.IsCancellationRequested)
+        {
+            await Task.Delay(TimeSpan.FromHours(1), ct);
+            await audio.EnforceCacheLimitsAsync();
         }
     }
 }

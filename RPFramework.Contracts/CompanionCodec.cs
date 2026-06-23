@@ -18,6 +18,12 @@ public static class CompanionCodec
 {
     private const int    Version = 1;
     private const string Prefix  = "RPNPC1:";
+
+    /// <summary>Hard cap on decompressed payload size. A sanitized <see cref="CharacterState"/> is far
+    /// smaller than this; the cap exists purely to defuse a GZip decompression bomb (DEFLATE reaches
+    /// ~1000:1, so a 512 KB code could otherwise inflate to hundreds of MB).</summary>
+    private const int MaxDecompressedBytes = 512 * 1024;
+
     private static readonly JsonSerializerOptions Json = new();
 
     public static string Encode(string displayName, CharacterState state)
@@ -44,7 +50,17 @@ public static class CompanionCodec
             using var ms    = new MemoryStream(bytes);
             using var gz    = new GZipStream(ms, CompressionMode.Decompress);
             using var outMs = new MemoryStream();
-            gz.CopyTo(outMs);
+
+            // Length-limited copy: read one byte past the cap so we can distinguish "exactly at cap"
+            // from "over cap", and bail the moment the bomb exceeds it instead of inflating it all.
+            var buffer = new byte[8192];
+            int read;
+            while ((read = gz.Read(buffer, 0, buffer.Length)) > 0)
+            {
+                if (outMs.Length + read > MaxDecompressedBytes) return false;
+                outMs.Write(buffer, 0, read);
+            }
+
             var dto = JsonSerializer.Deserialize<CompanionExport>(outMs.ToArray(), Json);
             if (dto is null || dto.FormatVersion != Version || dto.State is null) return false;
             export = dto;

@@ -31,11 +31,29 @@ public sealed class BgmAudioService
     // yt-dlp + ffmpeg can be slow on a cold cache; cap so a wedged child can't hang a request forever.
     private static readonly TimeSpan PrepareTimeout = TimeSpan.FromMinutes(5);
 
+    // ── Cache-bleed defenses ──────────────────────────────────────────────────
+    // The cache is uncompressed PCM WAV keyed by video id (shared across every room/campaign that plays
+    // the track - dedup is deliberate). Without bounds, scripted distinct-id plays fill the disk. Three
+    // guards: a global byte ceiling (LRU eviction), a last-access TTL (cold tracks expire), and a cap on
+    // simultaneous transcodes (a burst of distinct ids can't fork-storm yt-dlp).
+    private readonly long          _maxCacheBytes;       // hard ceiling on total cached WAV bytes
+    private readonly TimeSpan      _staleAfter;          // evict files not served within this window
+    private readonly SemaphoreSlim _prepareThrottle;     // bounds concurrent yt-dlp+ffmpeg children
+    private readonly SemaphoreSlim _evictGate = new(1, 1); // serializes eviction passes
+
     public BgmAudioService(IConfiguration config, ILogger<BgmAudioService> log)
     {
         _log      = log;
         _cacheDir = config["Bgm:CacheDir"] ?? Environment.GetEnvironmentVariable("BGM_CACHE_DIR") ?? "/app/bgm_cache";
         Directory.CreateDirectory(_cacheDir);
+
+        // Early-candidate defaults; expect to retune once telemetry shows real cache pressure.
+        _maxCacheBytes = ReadLong(config, "Bgm:MaxCacheBytes", "BGM_MAX_CACHE_BYTES", 5L * 1024 * 1024 * 1024); // 5 GB
+        int staleDays  = (int)ReadLong(config, "Bgm:StaleAfterDays", "BGM_STALE_AFTER_DAYS", 30);
+        _staleAfter    = TimeSpan.FromDays(Math.Max(1, staleDays));
+        int maxPrepare = (int)ReadLong(config, "Bgm:MaxConcurrentPrepares", "BGM_MAX_CONCURRENT_PREPARES", 3);
+        maxPrepare     = Math.Clamp(maxPrepare, 1, 16);
+        _prepareThrottle = new SemaphoreSlim(maxPrepare, maxPrepare);
 
         var key = config["Bgm:SigningKey"] ?? Environment.GetEnvironmentVariable("BGM_SIGNING_KEY");
         if (string.IsNullOrEmpty(key))
@@ -49,6 +67,13 @@ public sealed class BgmAudioService
     }
 
     public static bool IsValidVideoId(string? id) => id != null && VideoIdPattern.IsMatch(id);
+
+    /// <summary>Reads a numeric setting from config (Bgm:Key), env (ENV_VAR), or falls back to a default.</summary>
+    private static long ReadLong(IConfiguration config, string key, string envVar, long fallback)
+    {
+        var raw = config[key] ?? Environment.GetEnvironmentVariable(envVar);
+        return long.TryParse(raw, out var v) && v > 0 ? v : fallback;
+    }
 
     // ── Signed-URL minting / verification ─────────────────────────────────────
 
@@ -86,16 +111,73 @@ public sealed class BgmAudioService
     {
         if (!IsValidVideoId(videoId)) return null;
         string wavPath = Path.Combine(_cacheDir, videoId + ".wav");
-        if (File.Exists(wavPath)) return wavPath;
+        if (File.Exists(wavPath)) { Touch(wavPath); return wavPath; }
 
+        string? produced;
         var gate = _locks.GetOrAdd(videoId, _ => new SemaphoreSlim(1, 1));
         await gate.WaitAsync(ct);
         try
         {
-            if (File.Exists(wavPath)) return wavPath; // produced while we waited
-            return await DownloadAndTranscodeAsync(videoId, wavPath, ct);
+            if (File.Exists(wavPath)) { Touch(wavPath); return wavPath; } // produced while we waited
+
+            // Global transcode throttle: many distinct ids requested at once still spawn only a bounded
+            // number of yt-dlp+ffmpeg children; the rest queue here (cancellable via ct).
+            await _prepareThrottle.WaitAsync(ct);
+            try     { produced = await DownloadAndTranscodeAsync(videoId, wavPath, ct); }
+            finally { _prepareThrottle.Release(); }
         }
         finally { gate.Release(); }
+
+        // Enforce the cache ceiling after a fresh download (outside the per-id gate). The just-written
+        // file has the newest mtime, so LRU eviction won't immediately reclaim it.
+        if (produced != null) await EnforceCacheLimitsAsync();
+        return produced;
+    }
+
+    /// <summary>Marks a cache file as just-used so last-access (mtime) drives TTL + LRU eviction. We set
+    /// it explicitly rather than rely on filesystem atime, which is often disabled (noatime mounts).</summary>
+    private void Touch(string path)
+    {
+        try { File.SetLastWriteTimeUtc(path, DateTime.UtcNow); } catch { }
+    }
+
+    /// <summary>
+    /// Bounds the cache: first drops files not served within the TTL (cold tracks), then, if still over
+    /// the global byte ceiling, evicts least-recently-used files until under it. Deleting only removes the
+    /// cached WAV - the playlist row is separate, so a later play simply re-downloads on demand. Safe to
+    /// call concurrently (serialized internally); cheap enough to run after each download and on a timer.
+    /// </summary>
+    public async Task EnforceCacheLimitsAsync()
+    {
+        await _evictGate.WaitAsync();
+        try
+        {
+            var now = DateTime.UtcNow;
+            var files = new DirectoryInfo(_cacheDir).GetFiles("*.wav");
+
+            foreach (var f in files)
+                if (now - f.LastWriteTimeUtc > _staleAfter)
+                    TryDeleteFile(f.FullName);
+
+            // Re-stat after the stale pass, then LRU-evict down to the ceiling if needed.
+            files = new DirectoryInfo(_cacheDir).GetFiles("*.wav");
+            long total = files.Sum(f => f.Length);
+            if (total <= _maxCacheBytes) return;
+
+            foreach (var f in files.OrderBy(f => f.LastWriteTimeUtc))
+            {
+                if (total <= _maxCacheBytes) break;
+                if (TryDeleteFile(f.FullName)) total -= f.Length;
+            }
+        }
+        catch (Exception ex) { _log.LogWarning(ex, "BGM cache eviction pass failed"); }
+        finally { _evictGate.Release(); }
+    }
+
+    private bool TryDeleteFile(string path)
+    {
+        try { File.Delete(path); return true; }
+        catch (Exception ex) { _log.LogDebug(ex, "BGM cache: could not delete {Path}", path); return false; }
     }
 
     private async Task<string?> DownloadAndTranscodeAsync(string videoId, string wavPath, CancellationToken ct)
